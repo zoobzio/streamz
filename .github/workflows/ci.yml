@@ -1,0 +1,122 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: ['1.21', '1.22', '1.23']
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ matrix.go-version }}
+    
+    - name: Test streamz core
+      run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
+    
+    - name: Test examples
+      run: |
+        for dir in examples/*/; do
+          if [ -d "$dir" ] && [ -f "$dir/go.mod" ]; then
+            echo "Testing $dir"
+            (cd "$dir" && go test -v -race)
+          fi
+        done
+    
+    - name: Upload coverage
+      if: matrix.go-version == '1.23'
+      uses: codecov/codecov-action@v4
+      with:
+        file: ./coverage.txt
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.23'
+    
+    - name: golangci-lint
+      uses: golangci/golangci-lint-action@v6
+      with:
+        version: v1.64.8
+        args: --config=.golangci.yml --timeout=5m
+        skip-cache: false
+        skip-save-cache: false
+    
+    - name: Security Report
+      if: always()
+      run: |
+        golangci-lint run --config=.golangci.yml --out-format=json > lint-report.json || true
+        echo "### Security Scan Summary" >> $GITHUB_STEP_SUMMARY
+        echo "Linters with findings:" >> $GITHUB_STEP_SUMMARY
+        jq -r '.Issues[] | .FromLinter' lint-report.json 2>/dev/null | sort | uniq -c | sort -nr >> $GITHUB_STEP_SUMMARY || echo "No issues found ✅" >> $GITHUB_STEP_SUMMARY
+
+  benchmark:
+    name: Benchmark
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.23'
+    
+    - name: Run core benchmarks
+      run: |
+        echo "### Core Library Benchmarks" | tee benchmark_results.txt
+        go test -bench=. -benchmem -benchtime=1s ./... | tee -a benchmark_results.txt
+    
+    - name: Upload benchmark results
+      uses: actions/upload-artifact@v4
+      with:
+        name: benchmark-results
+        path: benchmark_results.txt
+
+  examples:
+    name: Example Validation
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.23'
+    
+    - name: Build and test examples
+      run: |
+        echo "### Building and testing all examples"
+        for dir in examples/*/; do
+          if [ -d "$dir" ] && [ -f "$dir/go.mod" ]; then
+            echo "#### Testing $dir"
+            (cd "$dir" && go build ./... && go test -v)
+          fi
+        done
+    
+    - name: Verify example imports
+      run: |
+        echo "### Verifying examples use streamz correctly"
+        for dir in examples/*/; do
+          if [ -d "$dir" ] && [ -f "$dir/go.mod" ]; then
+            echo "Checking $dir"
+            # Verify they import the streamz module
+            (cd "$dir" && go list -m github.com/zoobzio/streamz) || echo "Warning: $dir doesn't import streamz"
+          fi
+        done
