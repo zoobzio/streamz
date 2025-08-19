@@ -3,14 +3,19 @@ package streamz
 import (
 	"context"
 	"time"
+
+	"streamz/clock"
 )
 
 // TumblingWindow groups items into fixed-size, non-overlapping time windows.
 // Each item belongs to exactly one window, and windows are emitted when their
 // time period expires, making it ideal for time-based aggregations.
+//
+//nolint:govet // fieldalignment: struct layout optimized for readability
 type TumblingWindow[T any] struct {
-	name string
-	size time.Duration
+	name  string
+	clock clock.Clock
+	size  time.Duration
 }
 
 // NewTumblingWindow creates a processor that groups items into fixed-size time windows.
@@ -27,7 +32,7 @@ type TumblingWindow[T any] struct {
 // Example:
 //
 //	// Aggregate events into 1-minute windows
-//	window := streamz.NewTumblingWindow[Event](time.Minute)
+//	window := streamz.NewTumblingWindow[Event](time.Minute, clock.Real)
 //
 //	windows := window.Process(ctx, events)
 //	for w := range windows {
@@ -40,7 +45,7 @@ type TumblingWindow[T any] struct {
 //	}
 //
 //	// Hourly report generation
-//	hourly := streamz.NewTumblingWindow[Metric](time.Hour)
+//	hourly := streamz.NewTumblingWindow[Metric](time.Hour, clock.Real)
 //	reports := hourly.Process(ctx, metrics)
 //	for window := range reports {
 //		generateHourlyReport(window)
@@ -48,12 +53,14 @@ type TumblingWindow[T any] struct {
 //
 // Parameters:
 //   - size: Duration of each window (e.g., 1 minute, 1 hour)
+//   - clock: Clock interface for time operations
 //
 // Returns a new TumblingWindow processor for time-based grouping.
-func NewTumblingWindow[T any](size time.Duration) *TumblingWindow[T] {
+func NewTumblingWindow[T any](size time.Duration, clock clock.Clock) *TumblingWindow[T] {
 	return &TumblingWindow[T]{
-		size: size,
-		name: "tumbling-window",
+		size:  size,
+		name:  "tumbling-window",
+		clock: clock,
 	}
 }
 
@@ -63,13 +70,14 @@ func (w *TumblingWindow[T]) Process(ctx context.Context, in <-chan T) <-chan Win
 	go func() {
 		defer close(out)
 
-		ticker := time.NewTicker(w.size)
+		ticker := w.clock.NewTicker(w.size)
 		defer ticker.Stop()
 
+		now := w.clock.Now()
 		window := &Window[T]{
 			Items: []T{},
-			Start: time.Now(),
-			End:   time.Now().Add(w.size),
+			Start: now,
+			End:   now.Add(w.size),
 		}
 
 		for {
@@ -89,14 +97,15 @@ func (w *TumblingWindow[T]) Process(ctx context.Context, in <-chan T) <-chan Win
 				}
 				window.Items = append(window.Items, item)
 
-			case <-ticker.C:
+			case <-ticker.C():
 				if len(window.Items) > 0 {
 					out <- *window
 				}
+				now := w.clock.Now()
 				window = &Window[T]{
 					Items: []T{},
-					Start: time.Now(),
-					End:   time.Now().Add(w.size),
+					Start: now,
+					End:   now.Add(w.size),
 				}
 			}
 		}

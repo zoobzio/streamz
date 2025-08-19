@@ -17,6 +17,7 @@ type AsyncMapper[In, Out any] struct {
 // NewAsyncMapper creates a processor that executes transformations concurrently.
 // Despite parallel execution, output order matches input order exactly, making it
 // safe for order-sensitive operations while still gaining concurrency benefits.
+// Use the fluent API to configure optional behavior like worker count.
 //
 // When to use:
 //   - CPU-intensive transformations (image processing, encryption)
@@ -27,11 +28,16 @@ type AsyncMapper[In, Out any] struct {
 //
 // Example:
 //
-//	// Parallel API enrichment with 10 workers
-//	enricher := streamz.NewAsyncMapper(10, func(ctx context.Context, id string) (User, error) {
+//	// Parallel API enrichment with default workers (runtime.NumCPU())
+//	enricher := streamz.NewAsyncMapper(func(ctx context.Context, id string) (User, error) {
 //		// Each API call happens in parallel
 //		return fetchUserFromAPI(ctx, id)
 //	})
+//
+//	// Custom worker count for rate-limited APIs
+//	enricher := streamz.NewAsyncMapper(func(ctx context.Context, id string) (User, error) {
+//		return fetchUserFromAPI(ctx, id)
+//	}).WithWorkers(10)
 //
 //	enriched := enricher.Process(ctx, userIDs)
 //	for user := range enriched {
@@ -40,21 +46,34 @@ type AsyncMapper[In, Out any] struct {
 //	}
 //
 //	// CPU-intensive processing with all cores
-//	processor := streamz.NewAsyncMapper(runtime.NumCPU(), func(ctx context.Context, img Image) (Thumbnail, error) {
+//	processor := streamz.NewAsyncMapper(func(ctx context.Context, img Image) (Thumbnail, error) {
 //		return generateThumbnail(ctx, img)
-//	})
+//	}).WithWorkers(runtime.NumCPU())
 //
 // Parameters:
-//   - workers: Number of concurrent workers (typically runtime.NumCPU() for CPU-bound work)
 //   - fn: Transformation function that can be safely executed concurrently
 //
-// Returns a new AsyncMapper processor that maintains order while processing concurrently.
-func NewAsyncMapper[In, Out any](workers int, fn func(context.Context, In) (Out, error)) *AsyncMapper[In, Out] {
+// Returns a new AsyncMapper processor with fluent configuration.
+func NewAsyncMapper[In, Out any](fn func(context.Context, In) (Out, error)) *AsyncMapper[In, Out] {
 	return &AsyncMapper[In, Out]{
-		workers: workers,
+		workers: 4, // sensible default
 		fn:      fn,
 		name:    "async-mapper",
 	}
+}
+
+// WithWorkers sets the number of concurrent workers.
+// If not set, defaults to 4.
+func (a *AsyncMapper[In, Out]) WithWorkers(workers int) *AsyncMapper[In, Out] {
+	a.workers = workers
+	return a
+}
+
+// WithName sets a custom name for this processor.
+// If not set, defaults to "async-mapper".
+func (a *AsyncMapper[In, Out]) WithName(name string) *AsyncMapper[In, Out] {
+	a.name = name
+	return a
 }
 
 type sequencedItem[T any] struct {

@@ -2,33 +2,53 @@ package streamz
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
+
+	"streamz/clock"
+	clocktesting "streamz/clock/testing"
 )
 
 func TestDebounce(t *testing.T) {
 	ctx := context.Background()
-	in := make(chan int)
+	in := make(chan int, 10) // Buffered to avoid blocking
 
-	debounce := NewDebounce[int](50 * time.Millisecond)
+	clk := clocktesting.NewFakeClock(time.Now())
+	debounce := NewDebounce[int](50*time.Millisecond, clk)
 	out := debounce.Process(ctx, in)
 
+	results := []int{}
+	done := make(chan bool)
 	go func() {
-		in <- 1
-		time.Sleep(10 * time.Millisecond)
-		in <- 2
-		time.Sleep(10 * time.Millisecond)
-		in <- 3
-		time.Sleep(60 * time.Millisecond)
-		in <- 4
-		time.Sleep(60 * time.Millisecond)
-		close(in)
+		for val := range out {
+			results = append(results, val)
+		}
+		done <- true
 	}()
 
-	results := []int{}
-	for val := range out {
-		results = append(results, val)
-	}
+	// Rapid succession of values
+	in <- 1
+	clk.Step(10 * time.Millisecond)
+	in <- 2
+	clk.Step(10 * time.Millisecond)
+	in <- 3
+
+	// Let debounce timer expire
+	clk.Step(60 * time.Millisecond)
+	clk.BlockUntilReady()
+	time.Sleep(10 * time.Millisecond) // Allow goroutine scheduling
+
+	// Another value after gap
+	in <- 4
+
+	// Let second debounce timer expire
+	clk.Step(60 * time.Millisecond)
+	clk.BlockUntilReady()
+	time.Sleep(10 * time.Millisecond) // Allow goroutine scheduling
+
+	close(in)
+	<-done
 
 	if len(results) != 2 {
 		t.Errorf("expected 2 debounced values, got %d: %v", len(results), results)
@@ -48,7 +68,7 @@ func TestDebounceRapidFire(t *testing.T) {
 	ctx := context.Background()
 	in := make(chan int)
 
-	debounce := NewDebounce[int](100 * time.Millisecond)
+	debounce := NewDebounce[int](100*time.Millisecond, clock.Real)
 	out := debounce.Process(ctx, in)
 
 	go func() {
@@ -77,7 +97,7 @@ func TestDebounceFinalFlush(t *testing.T) {
 	ctx := context.Background()
 	in := make(chan int)
 
-	debounce := NewDebounce[int](50 * time.Millisecond)
+	debounce := NewDebounce[int](50*time.Millisecond, clock.Real)
 	out := debounce.Process(ctx, in)
 
 	go func() {
@@ -90,4 +110,59 @@ func TestDebounceFinalFlush(t *testing.T) {
 	if result != 42 {
 		t.Errorf("expected final item to be flushed on close, got %d", result)
 	}
+}
+
+// Example demonstrates debouncing rapid user input.
+func ExampleDebounce() {
+	ctx := context.Background()
+
+	// Debounce search queries to avoid excessive API calls.
+	// Wait 100ms after last keystroke before searching.
+	debouncer := NewDebounce[string](100*time.Millisecond, clock.Real)
+
+	// Simulate user typing a search query.
+	queries := make(chan string)
+	go func() {
+		// User types quickly.
+		queries <- "h"
+		time.Sleep(20 * time.Millisecond)
+		queries <- "he"
+		time.Sleep(20 * time.Millisecond)
+		queries <- "hel"
+		time.Sleep(20 * time.Millisecond)
+		queries <- "hell"
+		time.Sleep(20 * time.Millisecond)
+		queries <- "hello"
+
+		// User pauses (debounce triggers).
+		time.Sleep(150 * time.Millisecond)
+
+		// User continues typing.
+		queries <- "hello w"
+		time.Sleep(20 * time.Millisecond)
+		queries <- "hello wo"
+		time.Sleep(20 * time.Millisecond)
+		queries <- "hello wor"
+		time.Sleep(20 * time.Millisecond)
+		queries <- "hello worl"
+		time.Sleep(20 * time.Millisecond)
+		queries <- "hello world"
+
+		// Wait for final debounce.
+		time.Sleep(150 * time.Millisecond)
+		close(queries)
+	}()
+
+	// Process debounced queries.
+	debounced := debouncer.Process(ctx, queries)
+
+	fmt.Println("Search queries sent:")
+	for query := range debounced {
+		fmt.Printf("- Searching for: '%s'\n", query)
+	}
+
+	// Output:
+	// Search queries sent:
+	// - Searching for: 'hello'
+	// - Searching for: 'hello world'
 }

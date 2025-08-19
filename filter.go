@@ -15,6 +15,7 @@ type Filter[T any] struct {
 // NewFilter creates a processor that selectively passes items based on a predicate.
 // Only items for which the predicate returns true are forwarded to the output stream.
 // This is one of the most fundamental stream operations.
+// Use the fluent API to configure optional behavior like custom names.
 //
 // When to use:
 //   - Data validation and quality control
@@ -25,10 +26,15 @@ type Filter[T any] struct {
 //
 // Example:
 //
-//	// Filter positive numbers
-//	positive := streamz.NewFilter("positive", func(n int) bool {
+//	// Simple filter with auto-generated name
+//	positive := streamz.NewFilter(func(n int) bool {
 //		return n > 0
 //	})
+//
+//	// Filter with custom name for monitoring
+//	positive := streamz.NewFilter(func(n int) bool {
+//		return n > 0
+//	}).WithName("positive-numbers")
 //
 //	positives := positive.Process(ctx, numbers)
 //	for n := range positives {
@@ -37,22 +43,28 @@ type Filter[T any] struct {
 //	}
 //
 //	// Filter events by multiple criteria
-//	important := streamz.NewFilter("important-events", func(e Event) bool {
+//	important := streamz.NewFilter(func(e Event) bool {
 //		return e.Priority == "HIGH" &&
 //		       e.Timestamp.After(cutoffTime) &&
 //		       contains(allowedTypes, e.Type)
-//	})
+//	}).WithName("important-events")
 //
 // Parameters:
-//   - name: Descriptive name for debugging and monitoring
 //   - predicate: Function that returns true for items to keep
 //
-// Returns a new Filter processor that forwards only matching items.
-func NewFilter[T any](name string, predicate func(T) bool) *Filter[T] {
+// Returns a new Filter processor with fluent configuration.
+func NewFilter[T any](predicate func(T) bool) *Filter[T] {
 	return &Filter[T]{
 		predicate: predicate,
-		name:      name,
+		name:      "filter", // default name
 	}
+}
+
+// WithName sets a custom name for this processor.
+// If not set, defaults to "filter".
+func (f *Filter[T]) WithName(name string) *Filter[T] {
+	f.name = name
+	return f
 }
 
 func (f *Filter[T]) Process(ctx context.Context, in <-chan T) <-chan T {

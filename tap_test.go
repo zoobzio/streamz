@@ -2,6 +2,7 @@ package streamz
 
 import (
 	"context"
+	"fmt"
 	"sync/atomic"
 	"testing"
 )
@@ -69,4 +70,44 @@ func TestTapDoesNotModify(t *testing.T) {
 	if result.value != 999 {
 		t.Error("tap function should be able to modify the item")
 	}
+}
+
+// Example demonstrates side effects without modifying the stream.
+func ExampleTap() {
+	ctx := context.Background()
+
+	// Use tap for counting without affecting the stream.
+	var processedCount atomic.Int64
+
+	counter := NewTap(func(_ string) {
+		processedCount.Add(1)
+	})
+
+	// Simulate event stream.
+	events := make(chan string, 4)
+	events <- "user:login"
+	events <- "user:click"
+	events <- "user:purchase"
+	events <- "user:logout"
+	close(events)
+
+	// Process events with counting.
+	counted := counter.Process(ctx, events)
+
+	// Continue processing the unchanged stream.
+	fmt.Println("Events processed:")
+	for event := range counted {
+		fmt.Printf("- %s\n", event)
+	}
+
+	fmt.Printf("\nTotal events: %d\n", processedCount.Load())
+
+	// Output:
+	// Events processed:
+	// - user:login
+	// - user:click
+	// - user:purchase
+	// - user:logout
+	//
+	// Total events: 4
 }

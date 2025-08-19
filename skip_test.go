@@ -2,6 +2,7 @@ package streamz
 
 import (
 	"context"
+	"fmt"
 	"testing"
 )
 
@@ -58,4 +59,40 @@ func TestSkipAll(t *testing.T) {
 	if count != 0 {
 		t.Errorf("expected 0 items when skipping more than available, got %d", count)
 	}
+}
+
+// Example demonstrates skipping header rows in data processing.
+func ExampleSkip() {
+	ctx := context.Background()
+
+	// Skip the first 3 lines (headers and metadata).
+	skipper := NewSkip[string](3)
+
+	// Simulate CSV data with headers.
+	lines := make(chan string, 8)
+	lines <- "# Generated on 2024-01-18"
+	lines <- "# Data format: ID,Name,Value"
+	lines <- "ID,Name,Value"
+	lines <- "1,Alice,100"
+	lines <- "2,Bob,200"
+	lines <- "3,Carol,300"
+	lines <- "4,Dave,400"
+	lines <- "5,Eve,500"
+	close(lines)
+
+	// Process data rows only.
+	dataRows := skipper.Process(ctx, lines)
+
+	fmt.Println("Data rows:")
+	for row := range dataRows {
+		fmt.Printf("- %s\n", row)
+	}
+
+	// Output:
+	// Data rows:
+	// - 1,Alice,100
+	// - 2,Bob,200
+	// - 3,Carol,300
+	// - 4,Dave,400
+	// - 5,Eve,500
 }

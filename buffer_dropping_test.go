@@ -11,7 +11,7 @@ func TestDroppingBuffer(t *testing.T) {
 	in := make(chan int)
 
 	dropped := []int{}
-	buffer := NewDroppingBuffer(2, func(i int) {
+	buffer := NewDroppingBuffer[int](2).OnDrop(func(i int) {
 		dropped = append(dropped, i)
 	})
 	out := buffer.Process(ctx, in)

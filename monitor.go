@@ -4,6 +4,8 @@ import (
 	"context"
 	"sync/atomic"
 	"time"
+
+	"streamz/clock"
 )
 
 // StreamStats contains statistics about items flowing through a monitored stream.
@@ -20,17 +22,19 @@ type StreamStats struct {
 // Monitor observes items passing through a stream and periodically reports statistics.
 // It's a pass-through processor that doesn't modify the stream but provides visibility
 // into stream performance and throughput.
-type Monitor[T any] struct {
+type Monitor[T any] struct { //nolint:govet // logical field grouping preferred over memory optimization
 	onStats  func(StreamStats)
-	lastTime atomic.Value
+	lastTime AtomicTime
 	name     string
 	interval time.Duration
 	count    atomic.Int64
+	clock    clock.Clock
 }
 
 // NewMonitor creates a pass-through processor that observes stream performance.
 // It periodically reports statistics about throughput and processing rate without
 // modifying the stream data, providing essential observability for production systems.
+// Use the fluent API to configure optional behavior like statistics callbacks.
 //
 // When to use:
 //   - Production monitoring and alerting
@@ -41,16 +45,20 @@ type Monitor[T any] struct {
 //
 // Example:
 //
-//	// Monitor throughput every second
-//	monitor := streamz.NewMonitor(time.Second, func(stats streamz.StreamStats) {
-//		log.Printf("Processing rate: %.2f items/sec (count: %d)",
-//			stats.Rate, stats.Count)
+//	// Simple monitoring (no stats callback)
+//	monitor := streamz.NewMonitor[Event](time.Second, clock.Real)
 //
-//		// Alert on low throughput
-//		if stats.Rate < 100 {
-//			alertLowThroughput(stats)
-//		}
-//	})
+//	// With statistics callback
+//	monitor := streamz.NewMonitor[Event](time.Second, clock.Real).
+//		OnStats(func(stats streamz.StreamStats) {
+//			log.Printf("Processing rate: %.2f items/sec (count: %d)",
+//				stats.Rate, stats.Count)
+//
+//			// Alert on low throughput
+//			if stats.Rate < 100 {
+//				alertLowThroughput(stats)
+//			}
+//		})
 //
 //	monitored := monitor.Process(ctx, events)
 //	// Events pass through unchanged while being observed
@@ -62,16 +70,31 @@ type Monitor[T any] struct {
 //
 // Parameters:
 //   - interval: How often to report statistics
-//   - onStats: Callback function invoked with statistics at each interval
+//   - clock: Clock interface for time operations
 //
-// Returns a new Monitor processor that observes stream performance.
-func NewMonitor[T any](interval time.Duration, onStats func(StreamStats)) *Monitor[T] {
+// Returns a new Monitor processor with fluent configuration.
+func NewMonitor[T any](interval time.Duration, clock clock.Clock) *Monitor[T] {
 	m := &Monitor[T]{
 		name:     "monitor",
 		interval: interval,
-		onStats:  onStats,
+		clock:    clock,
+		// onStats is nil by default (no-op)
 	}
-	m.lastTime.Store(time.Now())
+	m.lastTime.Store(clock.Now())
+	return m
+}
+
+// OnStats sets a callback function to receive periodic statistics.
+// If not set, statistics are calculated but not reported.
+func (m *Monitor[T]) OnStats(fn func(StreamStats)) *Monitor[T] {
+	m.onStats = fn
+	return m
+}
+
+// WithName sets a custom name for this processor.
+// If not set, defaults to "monitor".
+func (m *Monitor[T]) WithName(name string) *Monitor[T] {
+	m.name = name
 	return m
 }
 
@@ -81,7 +104,7 @@ func (m *Monitor[T]) Process(ctx context.Context, in <-chan T) <-chan T {
 	go func() {
 		defer close(out)
 
-		ticker := time.NewTicker(m.interval)
+		ticker := m.clock.NewTicker(m.interval)
 		defer ticker.Stop()
 
 		for {
@@ -104,7 +127,7 @@ func (m *Monitor[T]) Process(ctx context.Context, in <-chan T) <-chan T {
 					return
 				}
 
-			case <-ticker.C:
+			case <-ticker.C():
 				m.reportStats()
 			}
 		}
@@ -115,11 +138,10 @@ func (m *Monitor[T]) Process(ctx context.Context, in <-chan T) <-chan T {
 
 func (m *Monitor[T]) reportStats() {
 	count := m.count.Load()
-	now := time.Now()
-	lastTimeVal := m.lastTime.Load()
-	lastTime, ok := lastTimeVal.(time.Time)
-	if !ok {
-		lastTime = time.Now()
+	now := m.clock.Now()
+	lastTime := m.lastTime.Load()
+	if lastTime.IsZero() {
+		lastTime = now
 	}
 	duration := now.Sub(lastTime).Seconds()
 

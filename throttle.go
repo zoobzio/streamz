@@ -3,12 +3,17 @@ package streamz
 import (
 	"context"
 	"time"
+
+	"streamz/clock"
 )
 
 // Throttle limits the rate of items passing through the stream.
+//
+//nolint:govet // fieldalignment: struct layout optimized for readability
 type Throttle[T any] struct {
-	name string
-	rps  float64
+	name  string
+	clock clock.Clock
+	rps   float64
 }
 
 // NewThrottle creates a processor that rate-limits items.
@@ -23,16 +28,21 @@ type Throttle[T any] struct {
 // Example:
 //
 //	// Limit API calls to 10 per second
-//	throttle := streamz.NewThrottle[APIRequest](10.0)
+//	throttle := streamz.NewThrottle[APIRequest](10.0, clock.Real)
 //	throttled := throttle.Process(ctx, requests)
 //
 //	// Process at most 100 items per second
-//	throttle := streamz.NewThrottle[Event](100.0)
+//	throttle := streamz.NewThrottle[Event](100.0, clock.Real)
 //	controlled := throttle.Process(ctx, events)
-func NewThrottle[T any](rps float64) *Throttle[T] {
+//
+// Parameters:
+//   - rps: Maximum requests (items) per second
+//   - clock: Clock interface for time operations
+func NewThrottle[T any](rps float64, clock clock.Clock) *Throttle[T] {
 	return &Throttle[T]{
-		rps:  rps,
-		name: "throttle",
+		rps:   rps,
+		name:  "throttle",
+		clock: clock,
 	}
 }
 
@@ -43,12 +53,12 @@ func (t *Throttle[T]) Process(ctx context.Context, in <-chan T) <-chan T {
 		defer close(out)
 
 		interval := time.Second / time.Duration(t.rps)
-		ticker := time.NewTicker(interval)
+		ticker := t.clock.NewTicker(interval)
 		defer ticker.Stop()
 
 		for item := range in {
 			select {
-			case <-ticker.C:
+			case <-ticker.C():
 				select {
 				case out <- item:
 				case <-ctx.Done():

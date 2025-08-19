@@ -2,6 +2,7 @@ package streamz
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -57,4 +58,38 @@ func TestBufferBackpressure(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		<-out
 	}
+}
+
+// Example demonstrates using a buffer to handle backpressure in a pipeline.
+func ExampleBuffer() {
+	ctx := context.Background()
+
+	// Create a buffer to handle bursts of events.
+	buffer := NewBuffer[string](100)
+
+	// Simulate burst of incoming events.
+	events := make(chan string)
+	go func() {
+		// Burst of events.
+		for i := 0; i < 5; i++ {
+			events <- fmt.Sprintf("event-%d", i)
+		}
+		close(events)
+	}()
+
+	// Process events with buffer handling backpressure.
+	buffered := buffer.Process(ctx, events)
+
+	// Slow consumer.
+	for event := range buffered {
+		fmt.Printf("Processing: %s\n", event)
+		// In real scenario, this might be slow I/O operation.
+	}
+
+	// Output:
+	// Processing: event-0
+	// Processing: event-1
+	// Processing: event-2
+	// Processing: event-3
+	// Processing: event-4
 }

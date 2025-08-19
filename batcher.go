@@ -2,16 +2,20 @@ package streamz
 
 import (
 	"context"
-	"time"
+
+	"streamz/clock"
 )
 
 // Batcher collects items from a stream and groups them into batches based on size or time constraints.
 // It emits a batch when either the maximum size is reached or the maximum latency expires,
 // whichever comes first. This is useful for optimizing downstream operations that work more
 // efficiently with groups of items rather than individual items.
+//
+//nolint:govet // fieldalignment: struct layout optimized for readability
 type Batcher[T any] struct {
-	name   string
 	config BatchConfig
+	name   string
+	clock  clock.Clock
 }
 
 // NewBatcher creates a processor that intelligently groups items into batches.
@@ -31,7 +35,7 @@ type Batcher[T any] struct {
 //	batcher := streamz.NewBatcher[Event](streamz.BatchConfig{
 //		MaxSize:    1000,
 //		MaxLatency: 5 * time.Second,
-//	})
+//	}, clock.Real)
 //
 //	batches := batcher.Process(ctx, events)
 //	for batch := range batches {
@@ -44,16 +48,18 @@ type Batcher[T any] struct {
 //	apiBatcher := streamz.NewBatcher[Request](streamz.BatchConfig{
 //		MaxSize:    100,  // API limit
 //		MaxLatency: 100 * time.Millisecond, // Max acceptable delay
-//	})
+//	}, clock.Real)
 //
 // Parameters:
 //   - config: Batch configuration with size and latency constraints
+//   - clock: Clock interface for time operations
 //
 // Returns a new Batcher processor that groups items efficiently.
-func NewBatcher[T any](config BatchConfig) *Batcher[T] {
+func NewBatcher[T any](config BatchConfig, clock clock.Clock) *Batcher[T] {
 	return &Batcher[T]{
 		config: config,
 		name:   "batcher",
+		clock:  clock,
 	}
 }
 
@@ -64,7 +70,7 @@ func (b *Batcher[T]) Process(ctx context.Context, in <-chan T) <-chan []T {
 		defer close(out)
 
 		batch := make([]T, 0, b.config.MaxSize)
-		timer := time.NewTimer(b.config.MaxLatency)
+		timer := b.clock.NewTimer(b.config.MaxLatency)
 		timer.Stop()
 
 		for {
@@ -98,7 +104,7 @@ func (b *Batcher[T]) Process(ctx context.Context, in <-chan T) <-chan []T {
 					batch = make([]T, 0, b.config.MaxSize)
 				}
 
-			case <-timer.C:
+			case <-timer.C():
 				if len(batch) > 0 {
 					out <- batch
 					batch = make([]T, 0, b.config.MaxSize)

@@ -6,48 +6,64 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"streamz/clock"
+	clocktesting "streamz/clock/testing"
 )
 
 func TestMonitor(t *testing.T) {
 	ctx := context.Background()
-	in := make(chan int)
+	in := make(chan int, 100) // Buffered to avoid blocking
 
 	var stats atomic.Value
-	monitor := NewMonitor[int](100*time.Millisecond, func(s StreamStats) {
+	clk := clocktesting.NewFakeClock(time.Now())
+	monitor := NewMonitor[int](100*time.Millisecond, clk).OnStats(func(s StreamStats) {
 		stats.Store(s)
 	})
 
 	out := monitor.Process(ctx, in)
 
+	// Consume output
+	consumed := 0
+	done := make(chan bool)
 	go func() {
-		for i := 0; i < 50; i++ {
-			in <- i
-			time.Sleep(2 * time.Millisecond)
+		for range out {
+			consumed++
 		}
-		close(in)
+		done <- true
 	}()
 
-	count := 0
-	for range out {
-		count++
+	// Send items
+	for i := 0; i < 50; i++ {
+		in <- i
 	}
 
-	if count != 50 {
-		t.Errorf("expected 50 items, got %d", count)
-	}
+	// Wait for all items to be consumed
+	time.Sleep(10 * time.Millisecond)
 
-	time.Sleep(150 * time.Millisecond)
+	// Advance time to trigger stats report
+	clk.Step(150 * time.Millisecond)
+	clk.BlockUntilReady()
+	time.Sleep(20 * time.Millisecond) // Allow goroutine scheduling
 
+	// Check stats were reported
 	if s, ok := stats.Load().(StreamStats); ok {
-		if s.Count == 0 {
-			t.Error("expected stats to be reported")
+		if s.Count != 50 {
+			t.Errorf("expected count of 50, got %d", s.Count)
 		}
 		if s.Rate == 0 {
 			t.Error("expected rate to be calculated")
 		}
+		// Rate should be 50 items / 0.15 seconds = ~333.33 items/sec
+		expectedRate := 50.0 / 0.15
+		if s.Rate < expectedRate*0.9 || s.Rate > expectedRate*1.1 {
+			t.Errorf("expected rate around %.2f, got %.2f", expectedRate, s.Rate)
+		}
 	} else {
 		t.Error("no stats reported")
 	}
+
+	close(in)
 }
 
 func TestMonitorRate(t *testing.T) {
@@ -56,7 +72,7 @@ func TestMonitorRate(t *testing.T) {
 
 	var mu sync.Mutex
 	rates := []float64{}
-	monitor := NewMonitor[int](50*time.Millisecond, func(s StreamStats) {
+	monitor := NewMonitor[int](50*time.Millisecond, clock.Real).OnStats(func(s StreamStats) {
 		if s.Rate > 0 {
 			mu.Lock()
 			rates = append(rates, s.Rate)

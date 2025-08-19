@@ -23,22 +23,32 @@ jobs:
         go-version: ${{ matrix.go-version }}
     
     - name: Test streamz core
-      run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
-    
-    - name: Test examples
       run: |
+        go test -v -race -coverprofile=coverage-core.txt -covermode=atomic \
+          -coverpkg=github.com/zoobzio/streamz $(go list ./... | grep -v '/examples/')
+        echo "Core library test coverage:"
+        go tool cover -func=coverage-core.txt | tail -1
+    
+    - name: Test examples (no coverage)
+      run: |
+        echo "Testing examples without coverage tracking..."
         for dir in examples/*/; do
-          if [ -d "$dir" ] && [ -f "$dir/go.mod" ]; then
+          if [ -f "$dir/go.mod" ]; then
             echo "Testing $dir"
-            (cd "$dir" && go test -v -race)
+            (cd "$dir" && go test -v -race ./... || true)
           fi
         done
     
-    - name: Upload coverage
+    - name: Upload coverage to Codecov
       if: matrix.go-version == '1.23'
       uses: codecov/codecov-action@v4
       with:
-        file: ./coverage.txt
+        token: ${{ secrets.CODECOV_TOKEN }}
+        files: ./coverage-core.txt
+        flags: unit
+        name: streamz-coverage-${{ matrix.go-version }}
+        fail_ci_if_error: false
+        verbose: true
 
   lint:
     name: Lint

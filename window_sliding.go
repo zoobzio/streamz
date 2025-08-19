@@ -3,20 +3,25 @@ package streamz
 import (
 	"context"
 	"time"
+
+	"streamz/clock"
 )
 
 // SlidingWindow groups items into overlapping time-based windows.
 // Unlike tumbling windows, sliding windows can overlap, allowing for
 // smooth transitions and rolling calculations over time periods.
+//
+//nolint:govet // fieldalignment: struct layout optimized for readability
 type SlidingWindow[T any] struct {
 	name  string
+	clock clock.Clock
 	size  time.Duration
 	slide time.Duration
 }
 
 // NewSlidingWindow creates a processor that groups items into overlapping time windows.
-// Each window has a fixed duration (size) and windows are created at regular intervals (slide).
-// When slide < size, windows overlap; when slide == size, it behaves like a tumbling window.
+// Each window has a fixed duration (size) and windows are created at regular intervals.
+// Use the fluent API to configure optional behavior like slide interval.
 //
 // When to use:
 //   - Computing rolling averages or moving statistics
@@ -27,8 +32,12 @@ type SlidingWindow[T any] struct {
 //
 // Example:
 //
-//	// 5-minute windows sliding every minute
-//	window := streamz.NewSlidingWindow[Metric](5*time.Minute, time.Minute)
+//	// Tumbling window (no overlap) by default
+//	window := streamz.NewSlidingWindow[Metric](5*time.Minute, clock.Real)
+//
+//	// With overlapping slide interval
+//	window := streamz.NewSlidingWindow[Metric](5*time.Minute, clock.Real).
+//		WithSlide(time.Minute)
 //
 //	windows := window.Process(ctx, metrics)
 //	for w := range windows {
@@ -42,20 +51,36 @@ type SlidingWindow[T any] struct {
 //	}
 //
 //	// Hourly windows every 15 minutes for trend detection
-//	trending := streamz.NewSlidingWindow[Event](time.Hour, 15*time.Minute)
+//	trending := streamz.NewSlidingWindow[Event](time.Hour, clock.Real).
+//		WithSlide(15*time.Minute)
 //	trends := trending.Process(ctx, events)
 //
 // Parameters:
 //   - size: Duration of each window (must be > 0)
-//   - slide: How often to create new windows (must be > 0)
+//   - clock: Clock interface for time operations
 //
-// Returns a new SlidingWindow processor.
-func NewSlidingWindow[T any](size, slide time.Duration) *SlidingWindow[T] {
+// Returns a new SlidingWindow processor with fluent configuration.
+func NewSlidingWindow[T any](size time.Duration, clock clock.Clock) *SlidingWindow[T] {
 	return &SlidingWindow[T]{
 		size:  size,
-		slide: slide,
+		slide: size, // default to tumbling window behavior
 		name:  "sliding-window",
+		clock: clock,
 	}
+}
+
+// WithSlide sets the slide interval for creating new windows.
+// If not set, defaults to the window size (tumbling window behavior).
+func (w *SlidingWindow[T]) WithSlide(slide time.Duration) *SlidingWindow[T] {
+	w.slide = slide
+	return w
+}
+
+// WithName sets a custom name for this processor.
+// If not set, defaults to "sliding-window".
+func (w *SlidingWindow[T]) WithName(name string) *SlidingWindow[T] {
+	w.name = name
+	return w
 }
 
 func (w *SlidingWindow[T]) Process(ctx context.Context, in <-chan T) <-chan Window[T] {
@@ -64,7 +89,7 @@ func (w *SlidingWindow[T]) Process(ctx context.Context, in <-chan T) <-chan Wind
 	go func() {
 		defer close(out)
 
-		ticker := time.NewTicker(w.slide)
+		ticker := w.clock.NewTicker(w.slide)
 		defer ticker.Stop()
 
 		windows := make(map[time.Time]*Window[T])
@@ -82,7 +107,7 @@ func (w *SlidingWindow[T]) Process(ctx context.Context, in <-chan T) <-chan Wind
 					return
 				}
 
-				now := time.Now()
+				now := w.clock.Now()
 				windowStart := now.Truncate(w.slide)
 
 				for start := windowStart; start.After(now.Add(-w.size)); start = start.Add(-w.slide) {
@@ -96,8 +121,8 @@ func (w *SlidingWindow[T]) Process(ctx context.Context, in <-chan T) <-chan Wind
 					windows[start].Items = append(windows[start].Items, item)
 				}
 
-			case <-ticker.C:
-				now := time.Now()
+			case <-ticker.C():
+				now := w.clock.Now()
 				for start, window := range windows {
 					if window.End.Before(now) {
 						out <- *window

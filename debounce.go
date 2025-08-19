@@ -4,12 +4,17 @@ import (
 	"context"
 	"sync"
 	"time"
+
+	"streamz/clock"
 )
 
 // Debounce emits items only after a quiet period with no new items.
 // It's useful for filtering out rapid successive events.
+//
+//nolint:govet // fieldalignment: struct layout optimized for readability
 type Debounce[T any] struct {
 	name     string
+	clock    clock.Clock
 	duration time.Duration
 }
 
@@ -25,16 +30,21 @@ type Debounce[T any] struct {
 // Example:
 //
 //	// Debounce search queries - only search after 300ms of no typing
-//	debounce := streamz.NewDebounce[string](300 * time.Millisecond)
+//	debounce := streamz.NewDebounce[string](300 * time.Millisecond, clock.Real)
 //	debounced := debounce.Process(ctx, searchQueries)
 //
 //	// Debounce sensor readings
-//	debounce := streamz.NewDebounce[SensorData](time.Second)
+//	debounce := streamz.NewDebounce[SensorData](time.Second, clock.Real)
 //	stable := debounce.Process(ctx, readings)
-func NewDebounce[T any](duration time.Duration) *Debounce[T] {
+//
+// Parameters:
+//   - duration: The quiet period before emitting an item
+//   - clock: Clock interface for time operations
+func NewDebounce[T any](duration time.Duration, clock clock.Clock) *Debounce[T] {
 	return &Debounce[T]{
 		duration: duration,
 		name:     "debounce",
+		clock:    clock,
 	}
 }
 
@@ -45,7 +55,7 @@ func (d *Debounce[T]) Process(ctx context.Context, in <-chan T) <-chan T {
 		defer close(out)
 
 		var mu sync.Mutex
-		var timer *time.Timer
+		var timer clock.Timer
 		var pending T
 		var hasPending bool
 
@@ -58,7 +68,7 @@ func (d *Debounce[T]) Process(ctx context.Context, in <-chan T) <-chan T {
 				timer.Stop()
 			}
 
-			timer = time.AfterFunc(d.duration, func() {
+			timer = d.clock.AfterFunc(d.duration, func() {
 				mu.Lock()
 				defer mu.Unlock()
 

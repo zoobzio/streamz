@@ -14,7 +14,7 @@ type DroppingBuffer[T any] struct {
 }
 
 // NewDroppingBuffer creates a buffer that drops oldest items when full.
-// The onDrop callback is called for each dropped item, allowing for metrics or logging.
+// Use the fluent API to configure optional behavior like drop callbacks.
 //
 // When to use:
 //   - Real-time data streams where latest data is more important than completeness
@@ -24,11 +24,15 @@ type DroppingBuffer[T any] struct {
 //
 // Example:
 //
-//	// Create a dropping buffer that logs dropped items
-//	buffer := streamz.NewDroppingBuffer(100, func(item Event) {
-//		log.Printf("Dropped event: %v", item.ID)
-//		metrics.Increment("events.dropped")
-//	})
+//	// Simple dropping buffer
+//	buffer := streamz.NewDroppingBuffer[Event](100)
+//
+//	// With drop callback for metrics
+//	buffer := streamz.NewDroppingBuffer[Event](100).
+//		OnDrop(func(item Event) {
+//			log.Printf("Dropped event: %v", item.ID)
+//			metrics.Increment("events.dropped")
+//		})
 //
 //	// Use in a pipeline
 //	buffered := buffer.Process(ctx, events)
@@ -39,15 +43,28 @@ type DroppingBuffer[T any] struct {
 //
 // Parameters:
 //   - size: Buffer capacity (must be > 0)
-//   - onDrop: Callback function invoked for each dropped item (can be nil)
 //
-// Returns a new DroppingBuffer processor.
-func NewDroppingBuffer[T any](size int, onDrop func(T)) *DroppingBuffer[T] {
+// Returns a new DroppingBuffer processor with fluent configuration.
+func NewDroppingBuffer[T any](size int) *DroppingBuffer[T] {
 	return &DroppingBuffer[T]{
-		size:   size,
-		name:   "dropping-buffer",
-		onDrop: onDrop,
+		size: size,
+		name: "dropping-buffer",
+		// onDrop is nil by default (no-op)
 	}
+}
+
+// OnDrop sets a callback function to be called for each dropped item.
+// If not set, dropped items are silently discarded.
+func (d *DroppingBuffer[T]) OnDrop(fn func(T)) *DroppingBuffer[T] {
+	d.onDrop = fn
+	return d
+}
+
+// WithName sets a custom name for this processor.
+// If not set, defaults to "dropping-buffer".
+func (d *DroppingBuffer[T]) WithName(name string) *DroppingBuffer[T] {
+	d.name = name
+	return d
 }
 
 func (d *DroppingBuffer[T]) Process(ctx context.Context, in <-chan T) <-chan T {
