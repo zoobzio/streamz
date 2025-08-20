@@ -1,4 +1,4 @@
-module streamz
+module github.com/zoobzio/streamz
 
 go 1.23.0
 
