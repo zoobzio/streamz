@@ -4,8 +4,6 @@ import (
 	"context"
 	"sync"
 	"time"
-
-	"streamz/clock"
 )
 
 // SessionWindow groups items into dynamic windows based on activity gaps.
@@ -15,7 +13,7 @@ import (
 //nolint:govet // fieldalignment: struct layout optimized for readability
 type SessionWindow[T any] struct {
 	name    string
-	clock   clock.Clock
+	clock   Clock
 	keyFunc func(T) string
 	gap     time.Duration
 }
@@ -37,13 +35,13 @@ type SessionWindow[T any] struct {
 //	// Group user actions into sessions (30-minute default gap)
 //	sessions := streamz.NewSessionWindow(
 //		func(action UserAction) string { return action.UserID },
-//		clock.Real,
+//		Real,
 //	)
 //
 //	// With custom gap duration
 //	sessions := streamz.NewSessionWindow(
 //		func(action UserAction) string { return action.UserID },
-//		clock.Real,
+//		Real,
 //	).WithGap(30*time.Minute)
 //
 //	userSessions := sessions.Process(ctx, actions)
@@ -59,7 +57,7 @@ type SessionWindow[T any] struct {
 //	// Group related log entries with 5-second gaps
 //	logSessions := streamz.NewSessionWindow(
 //		func(log LogEntry) string { return log.RequestID },
-//		clock.Real,
+//		Real,
 //	).WithGap(5*time.Second)
 //
 // Parameters:
@@ -67,7 +65,7 @@ type SessionWindow[T any] struct {
 //   - clock: Clock interface for time operations
 //
 // Returns a new SessionWindow processor with fluent configuration.
-func NewSessionWindow[T any](keyFunc func(T) string, clock clock.Clock) *SessionWindow[T] {
+func NewSessionWindow[T any](keyFunc func(T) string, clock Clock) *SessionWindow[T] {
 	return &SessionWindow[T]{
 		gap:     30 * time.Minute, // sensible default
 		name:    "session-window",
@@ -97,7 +95,7 @@ func (w *SessionWindow[T]) Process(ctx context.Context, in <-chan T) <-chan Wind
 		defer close(out)
 
 		sessions := make(map[string]*Window[T])
-		timers := make(map[string]clock.Timer)
+		timers := make(map[string]Timer)
 		var mu sync.Mutex
 
 		for {
@@ -159,6 +157,7 @@ func (w *SessionWindow[T]) Process(ctx context.Context, in <-chan T) <-chan Wind
 
 				timer := w.clock.AfterFunc(w.gap, func() {
 					mu.Lock()
+					defer mu.Unlock()
 
 					if session, exists := sessions[key]; exists {
 						// Make a copy to send.
@@ -166,14 +165,11 @@ func (w *SessionWindow[T]) Process(ctx context.Context, in <-chan T) <-chan Wind
 						delete(sessions, key)
 						delete(timers, key)
 
-						// Send outside the lock.
-						mu.Unlock()
+						// Send with lock held to prevent race.
 						select {
 						case out <- windowCopy:
 						case <-ctx.Done():
 						}
-					} else {
-						mu.Unlock()
 					}
 				})
 				timers[key] = timer

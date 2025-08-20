@@ -5,16 +5,13 @@ import (
 	"fmt"
 	"testing"
 	"time"
-
-	"streamz/clock"
-	clocktesting "streamz/clock/testing"
 )
 
 func TestDedupe(t *testing.T) {
 	ctx := context.Background()
 	in := make(chan int)
 
-	dedupe := NewDedupe(func(i int) int { return i }, clock.Real).WithTTL(100 * time.Millisecond)
+	dedupe := NewDedupe(func(i int) int { return i }, RealClock).WithTTL(100 * time.Millisecond)
 	out := dedupe.Process(ctx, in)
 
 	go func() {
@@ -44,22 +41,34 @@ func TestDedupeTTL(t *testing.T) {
 	ctx := context.Background()
 	in := make(chan int)
 
-	clk := clocktesting.NewFakeClock(time.Now())
+	clk := NewFakeClock(time.Now())
 	dedupe := NewDedupe(func(i int) int { return i }, clk).WithTTL(50 * time.Millisecond)
 	out := dedupe.Process(ctx, in)
 
+	results := []int{}
+	done := make(chan bool)
 	go func() {
-		in <- 1
-		clk.Step(60 * time.Millisecond)
-		in <- 1
-		in <- 2
-		close(in)
+		for result := range out {
+			results = append(results, result)
+		}
+		done <- true
 	}()
 
-	results := []int{}
-	for result := range out {
-		results = append(results, result)
-	}
+	// Send first value
+	in <- 1
+	time.Sleep(10 * time.Millisecond) // Let it be processed
+
+	// Advance clock past TTL
+	clk.Step(60 * time.Millisecond)
+	time.Sleep(10 * time.Millisecond) // Let TTL cleanup happen
+
+	// Send same value again (should pass through) and a new value
+	in <- 1
+	in <- 2
+	time.Sleep(10 * time.Millisecond) // Let them be processed
+
+	close(in)
+	<-done
 
 	if len(results) != 3 {
 		t.Errorf("expected 3 items (1 appeared twice after TTL), got %d: %v", len(results), results)
@@ -70,7 +79,7 @@ func TestDedupeCustomKey(t *testing.T) {
 	ctx := context.Background()
 	in := make(chan string)
 
-	dedupe := NewDedupe(func(s string) int { return len(s) }, clock.Real).WithTTL(100 * time.Millisecond)
+	dedupe := NewDedupe(func(s string) int { return len(s) }, RealClock).WithTTL(100 * time.Millisecond)
 	out := dedupe.Process(ctx, in)
 
 	go func() {
@@ -97,7 +106,7 @@ func TestDedupeCustomKey(t *testing.T) {
 
 func TestDedupeCleanup(t *testing.T) {
 	ctx := context.Background()
-	clk := clocktesting.NewFakeClock(time.Now())
+	clk := NewFakeClock(time.Now())
 
 	// Create dedupe with 40ms TTL, cleanup runs every 20ms
 	dedupe := NewDedupe(func(i int) int { return i }, clk).WithTTL(40 * time.Millisecond)
@@ -199,7 +208,7 @@ func ExampleDedupe() {
 	// Using shorter TTL for example.
 	deduper := NewDedupe(func(e Event) string {
 		return e.ID
-	}, clock.Real).WithTTL(100 * time.Millisecond).WithName("event-deduper")
+	}, RealClock).WithTTL(100 * time.Millisecond).WithName("event-deduper")
 
 	// Simulate event stream with duplicates.
 	events := make(chan Event)

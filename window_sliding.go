@@ -3,8 +3,6 @@ package streamz
 import (
 	"context"
 	"time"
-
-	"streamz/clock"
 )
 
 // SlidingWindow groups items into overlapping time-based windows.
@@ -14,7 +12,7 @@ import (
 //nolint:govet // fieldalignment: struct layout optimized for readability
 type SlidingWindow[T any] struct {
 	name  string
-	clock clock.Clock
+	clock Clock
 	size  time.Duration
 	slide time.Duration
 }
@@ -33,10 +31,10 @@ type SlidingWindow[T any] struct {
 // Example:
 //
 //	// Tumbling window (no overlap) by default
-//	window := streamz.NewSlidingWindow[Metric](5*time.Minute, clock.Real)
+//	window := streamz.NewSlidingWindow[Metric](5*time.Minute, Real)
 //
 //	// With overlapping slide interval
-//	window := streamz.NewSlidingWindow[Metric](5*time.Minute, clock.Real).
+//	window := streamz.NewSlidingWindow[Metric](5*time.Minute, Real).
 //		WithSlide(time.Minute)
 //
 //	windows := window.Process(ctx, metrics)
@@ -51,7 +49,7 @@ type SlidingWindow[T any] struct {
 //	}
 //
 //	// Hourly windows every 15 minutes for trend detection
-//	trending := streamz.NewSlidingWindow[Event](time.Hour, clock.Real).
+//	trending := streamz.NewSlidingWindow[Event](time.Hour, Real).
 //		WithSlide(15*time.Minute)
 //	trends := trending.Process(ctx, events)
 //
@@ -60,7 +58,7 @@ type SlidingWindow[T any] struct {
 //   - clock: Clock interface for time operations
 //
 // Returns a new SlidingWindow processor with fluent configuration.
-func NewSlidingWindow[T any](size time.Duration, clock clock.Clock) *SlidingWindow[T] {
+func NewSlidingWindow[T any](size time.Duration, clock Clock) *SlidingWindow[T] {
 	return &SlidingWindow[T]{
 		size:  size,
 		slide: size, // default to tumbling window behavior

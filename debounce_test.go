@@ -5,20 +5,19 @@ import (
 	"fmt"
 	"testing"
 	"time"
-
-	"streamz/clock"
-	clocktesting "streamz/clock/testing"
 )
 
 func TestDebounce(t *testing.T) {
 	ctx := context.Background()
-	in := make(chan int, 10) // Buffered to avoid blocking
 
-	clk := clocktesting.NewFakeClock(time.Now())
+	clk := NewFakeClock(time.Now())
 	debounce := NewDebounce[int](50*time.Millisecond, clk)
+
+	in := make(chan int)
 	out := debounce.Process(ctx, in)
 
-	results := []int{}
+	// Collect results
+	var results []int
 	done := make(chan bool)
 	go func() {
 		for val := range out {
@@ -27,40 +26,48 @@ func TestDebounce(t *testing.T) {
 		done <- true
 	}()
 
-	// Rapid succession of values
-	in <- 1
-	clk.Step(10 * time.Millisecond)
-	in <- 2
-	clk.Step(10 * time.Millisecond)
-	in <- 3
+	// Send rapid succession of values
+	go func() {
+		in <- 1
+		in <- 2
+		in <- 3
+	}()
 
-	// Let debounce timer expire
+	// Let values be processed
+	time.Sleep(10 * time.Millisecond)
+
+	// Advance clock to trigger debounce
 	clk.Step(60 * time.Millisecond)
 	clk.BlockUntilReady()
-	time.Sleep(10 * time.Millisecond) // Allow goroutine scheduling
 
-	// Another value after gap
+	// Give time for value to propagate
+	time.Sleep(10 * time.Millisecond)
+
+	// Send another value after gap
 	in <- 4
 
-	// Let second debounce timer expire
+	// Advance clock to trigger second debounce
 	clk.Step(60 * time.Millisecond)
 	clk.BlockUntilReady()
-	time.Sleep(10 * time.Millisecond) // Allow goroutine scheduling
 
+	// Give time for value to propagate
+	time.Sleep(10 * time.Millisecond)
+
+	// Close input
 	close(in)
 	<-done
 
+	// Verify results
 	if len(results) != 2 {
 		t.Errorf("expected 2 debounced values, got %d: %v", len(results), results)
 	}
 
-	if len(results) >= 2 {
-		if results[0] != 3 {
-			t.Errorf("expected first debounced value to be 3, got %d", results[0])
-		}
-		if results[1] != 4 {
-			t.Errorf("expected second debounced value to be 4, got %d", results[1])
-		}
+	if len(results) >= 1 && results[0] != 3 {
+		t.Errorf("expected first debounced value to be 3, got %d", results[0])
+	}
+
+	if len(results) >= 2 && results[1] != 4 {
+		t.Errorf("expected second debounced value to be 4, got %d", results[1])
 	}
 }
 
@@ -68,7 +75,7 @@ func TestDebounceRapidFire(t *testing.T) {
 	ctx := context.Background()
 	in := make(chan int)
 
-	debounce := NewDebounce[int](100*time.Millisecond, clock.Real)
+	debounce := NewDebounce[int](100*time.Millisecond, RealClock)
 	out := debounce.Process(ctx, in)
 
 	go func() {
@@ -97,7 +104,7 @@ func TestDebounceFinalFlush(t *testing.T) {
 	ctx := context.Background()
 	in := make(chan int)
 
-	debounce := NewDebounce[int](50*time.Millisecond, clock.Real)
+	debounce := NewDebounce[int](50*time.Millisecond, RealClock)
 	out := debounce.Process(ctx, in)
 
 	go func() {
@@ -118,7 +125,7 @@ func ExampleDebounce() {
 
 	// Debounce search queries to avoid excessive API calls.
 	// Wait 100ms after last keystroke before searching.
-	debouncer := NewDebounce[string](100*time.Millisecond, clock.Real)
+	debouncer := NewDebounce[string](100*time.Millisecond, RealClock)
 
 	// Simulate user typing a search query.
 	queries := make(chan string)

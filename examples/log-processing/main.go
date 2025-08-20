@@ -1,4 +1,4 @@
-// Real-Time Log Processing Pipeline Example
+// RealClock-Time Log Processing Pipeline Example
 // ========================================
 // This demonstrates building a production log processing system using streamz.
 // The system evolves from a simple MVP to a sophisticated real-time analytics
@@ -25,7 +25,7 @@ func main() {
 	// Enable test mode for faster demos
 	TestMode = true
 
-	fmt.Println("=== Real-Time Log Processing Pipeline Demo ===")
+	fmt.Println("=== RealClock-Time Log Processing Pipeline Demo ===")
 	fmt.Println("Building a production log analytics system that evolves from MVP to enterprise-grade")
 	fmt.Println()
 
@@ -104,8 +104,8 @@ func runFullDemo(ctx context.Context) {
 	fmt.Println("Dev: 'Well, it was stuck in a batch...'")
 	time.Sleep(2 * time.Second)
 
-	// Sprint 3: Real-time alerts
-	fmt.Println("\n\n📦 SPRINT 3: Real-Time Error Detection!")
+	// Sprint 3: RealClock-time alerts
+	fmt.Println("\n\n📦 SPRINT 3: RealClock-Time Error Detection!")
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	fmt.Println("Ops: 'We need immediate alerts for errors!'")
 	fmt.Println("Dev: 'I'll add parallel processing...'")

@@ -5,9 +5,6 @@ import (
 	"fmt"
 	"testing"
 	"time"
-
-	"streamz/clock"
-	clocktesting "streamz/clock/testing"
 )
 
 // TestSlidingWindowBasic tests basic sliding window functionality.
@@ -15,7 +12,7 @@ func TestSlidingWindowBasic(t *testing.T) {
 	ctx := context.Background()
 
 	// 100ms windows sliding every 50ms.
-	clk := clocktesting.NewFakeClock(time.Now())
+	clk := NewFakeClock(time.Now())
 	windower := NewSlidingWindow[int](100*time.Millisecond, clk).
 		WithSlide(50 * time.Millisecond).
 		WithName("test-sliding")
@@ -84,7 +81,7 @@ func TestSlidingWindowTumbling(t *testing.T) {
 	ctx := context.Background()
 
 	// When slide equals size, it's a tumbling window.
-	windower := NewSlidingWindow[int](100*time.Millisecond, clock.Real).
+	windower := NewSlidingWindow[int](100*time.Millisecond, RealClock).
 		WithSlide(100 * time.Millisecond)
 
 	input := make(chan int)
@@ -127,7 +124,7 @@ func TestSlidingWindowTumbling(t *testing.T) {
 func TestSlidingWindowMaxCount(t *testing.T) {
 	ctx := context.Background()
 
-	windower := NewSlidingWindow[string](200*time.Millisecond, clock.Real).
+	windower := NewSlidingWindow[string](200*time.Millisecond, RealClock).
 		WithSlide(100 * time.Millisecond)
 
 	input := make(chan string)
@@ -175,7 +172,7 @@ func TestSlidingWindowMaxCount(t *testing.T) {
 func TestSlidingWindowEmptyInput(t *testing.T) {
 	ctx := context.Background()
 
-	windower := NewSlidingWindow[int](100*time.Millisecond, clock.Real).
+	windower := NewSlidingWindow[int](100*time.Millisecond, RealClock).
 		WithSlide(50 * time.Millisecond)
 
 	input := make(chan int)
@@ -197,7 +194,7 @@ func TestSlidingWindowEmptyInput(t *testing.T) {
 func TestSlidingWindowSingleItem(t *testing.T) {
 	ctx := context.Background()
 
-	windower := NewSlidingWindow[int](100*time.Millisecond, clock.Real).
+	windower := NewSlidingWindow[int](100*time.Millisecond, RealClock).
 		WithSlide(50 * time.Millisecond)
 
 	input := make(chan int)
@@ -240,7 +237,7 @@ func TestSlidingWindowSingleItem(t *testing.T) {
 func TestSlidingWindowContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	windower := NewSlidingWindow[int](100*time.Millisecond, clock.Real).
+	windower := NewSlidingWindow[int](100*time.Millisecond, RealClock).
 		WithSlide(50 * time.Millisecond)
 
 	input := make(chan int)
@@ -285,7 +282,7 @@ func TestSlidingWindowConfiguration(t *testing.T) {
 	ctx := context.Background()
 
 	// Test with slide > size (should adjust).
-	windower := NewSlidingWindow[int](50*time.Millisecond, clock.Real).
+	windower := NewSlidingWindow[int](50*time.Millisecond, RealClock).
 		WithSlide(100 * time.Millisecond) // Larger than size.
 
 	input := make(chan int)
@@ -321,7 +318,7 @@ func TestSlidingWindowConfiguration(t *testing.T) {
 func BenchmarkSlidingWindow(b *testing.B) {
 	ctx := context.Background()
 
-	windower := NewSlidingWindow[int](100*time.Millisecond, clock.Real).
+	windower := NewSlidingWindow[int](100*time.Millisecond, RealClock).
 		WithSlide(50 * time.Millisecond)
 
 	b.ResetTimer()
@@ -355,7 +352,7 @@ func ExampleSlidingWindow() {
 	ctx := context.Background()
 
 	// 5-second windows, sliding every second.
-	windower := NewSlidingWindow[float64](5*time.Second, clock.Real).
+	windower := NewSlidingWindow[float64](5*time.Second, RealClock).
 		WithSlide(time.Second)
 
 	// Simulate temperature readings.

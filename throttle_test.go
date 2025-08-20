@@ -4,15 +4,13 @@ import (
 	"context"
 	"testing"
 	"time"
-
-	"streamz/clock"
 )
 
 func TestThrottle(t *testing.T) {
 	ctx := context.Background()
 	in := make(chan int)
 
-	throttle := NewThrottle[int](10, clock.Real)
+	throttle := NewThrottle[int](10, RealClock)
 	out := throttle.Process(ctx, in)
 
 	start := time.Now()
@@ -46,7 +44,7 @@ func TestThrottleHighRate(t *testing.T) {
 	ctx := context.Background()
 	in := make(chan int)
 
-	throttle := NewThrottle[int](1000, clock.Real)
+	throttle := NewThrottle[int](1000, RealClock)
 	out := throttle.Process(ctx, in)
 
 	go func() {

@@ -1,6 +1,6 @@
-// Package clock provides an interface for time-related operations,
-// allowing for deterministic testing of time-dependent code.
-package clock
+// Package streamz provides streaming data processing capabilities,
+// including time-related operations for deterministic testing.
+package streamz
 
 import "time"
 
@@ -53,8 +53,8 @@ type Ticker interface {
 	C() <-chan time.Time
 }
 
-// Real is the default Clock implementation using the standard time package.
-var Real Clock = &realClock{}
+// RealClock is the default Clock implementation using the standard time package.
+var RealClock Clock = &realClock{}
 
 // realClock implements Clock using the standard time package.
 type realClock struct{}

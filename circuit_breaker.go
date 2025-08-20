@@ -4,8 +4,6 @@ import (
 	"context"
 	"sync/atomic"
 	"time"
-
-	"streamz/clock"
 )
 
 // State represents the current state of the circuit breaker.
@@ -75,10 +73,10 @@ type CircuitStats struct { //nolint:govet // logical field grouping preferred ov
 //		return callExternalService(ctx, req)
 //	}).WithWorkers(10)
 //
-//	protected := streamz.NewCircuitBreaker(processor, clock.Real)
+//	protected := streamz.NewCircuitBreaker(processor, Real)
 //
 //	// Custom configuration.
-//	protected := streamz.NewCircuitBreaker(processor, clock.Real).
+//	protected := streamz.NewCircuitBreaker(processor, Real).
 //		FailureThreshold(0.5).      // Open at 50% failure rate.
 //		MinRequests(10).            // Need 10 requests before calculating.
 //		RecoveryTimeout(30*time.Second). // Wait 30s before half-open.
@@ -86,7 +84,7 @@ type CircuitStats struct { //nolint:govet // logical field grouping preferred ov
 //		WithName("api-circuit")
 //
 //	// With state change notifications.
-//	protected := streamz.NewCircuitBreaker(processor, clock.Real).
+//	protected := streamz.NewCircuitBreaker(processor, Real).
 //		OnStateChange(func(from, to State) {
 //			log.Printf("Circuit breaker state changed: %s -> %s", from, to)
 //		}).
@@ -112,7 +110,7 @@ type CircuitBreaker[T any] struct { //nolint:govet // logical field grouping pre
 	minRequests      int64
 	recoveryTimeout  time.Duration
 	halfOpenRequests int64
-	clock            clock.Clock
+	clock            Clock
 
 	// State management.
 	state           atomic.Int32 // Current state (State type).
@@ -152,7 +150,7 @@ type CircuitBreaker[T any] struct { //nolint:govet // logical field grouping pre
 //   - clock: Clock interface for time operations
 //
 // Returns a new CircuitBreaker with fluent configuration methods.
-func NewCircuitBreaker[T any](processor Processor[T, T], clock clock.Clock) *CircuitBreaker[T] {
+func NewCircuitBreaker[T any](processor Processor[T, T], clock Clock) *CircuitBreaker[T] {
 	cb := &CircuitBreaker[T]{
 		processor:        processor,
 		name:             "circuit-breaker",

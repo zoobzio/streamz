@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"testing"
 	"time"
-
-	"streamz/clock"
 )
 
 // TestSessionWindowBasic tests basic session windowing.
@@ -14,7 +12,7 @@ func TestSessionWindowBasic(t *testing.T) {
 	ctx := context.Background()
 
 	// Create session window with 100ms timeout.
-	windower := NewSessionWindow(func(_ int) string { return "all" }, clock.Real).WithGap(100 * time.Millisecond).WithName("test-session")
+	windower := NewSessionWindow(func(_ int) string { return "all" }, RealClock).WithGap(100 * time.Millisecond).WithName("test-session")
 
 	input := make(chan int)
 	output := windower.Process(ctx, input)
@@ -69,7 +67,7 @@ func TestSessionWindowBasic(t *testing.T) {
 func TestSessionWindowSingleItem(t *testing.T) {
 	ctx := context.Background()
 
-	windower := NewSessionWindow(func(_ string) string { return "all" }, clock.Real).WithGap(50 * time.Millisecond)
+	windower := NewSessionWindow(func(_ string) string { return "all" }, RealClock).WithGap(50 * time.Millisecond)
 
 	input := make(chan string)
 	output := windower.Process(ctx, input)
@@ -105,7 +103,7 @@ func TestSessionWindowSingleItem(t *testing.T) {
 func TestSessionWindowEmptyInput(t *testing.T) {
 	ctx := context.Background()
 
-	windower := NewSessionWindow(func(_ int) string { return "all" }, clock.Real).WithGap(100 * time.Millisecond)
+	windower := NewSessionWindow(func(_ int) string { return "all" }, RealClock).WithGap(100 * time.Millisecond)
 
 	input := make(chan int)
 	close(input)
@@ -126,7 +124,7 @@ func TestSessionWindowEmptyInput(t *testing.T) {
 func TestSessionWindowRapidInput(t *testing.T) {
 	ctx := context.Background()
 
-	windower := NewSessionWindow(func(_ int) string { return "all" }, clock.Real).WithGap(200 * time.Millisecond)
+	windower := NewSessionWindow(func(_ int) string { return "all" }, RealClock).WithGap(200 * time.Millisecond)
 
 	input := make(chan int)
 	output := windower.Process(ctx, input)
@@ -166,7 +164,7 @@ func TestSessionWindowRapidInput(t *testing.T) {
 func TestSessionWindowMultipleSessions(t *testing.T) {
 	ctx := context.Background()
 
-	windower := NewSessionWindow(func(_ string) string { return "all" }, clock.Real).WithGap(50 * time.Millisecond)
+	windower := NewSessionWindow(func(_ string) string { return "all" }, RealClock).WithGap(50 * time.Millisecond)
 
 	input := make(chan string)
 	output := windower.Process(ctx, input)
@@ -223,7 +221,7 @@ func TestSessionWindowMultipleSessions(t *testing.T) {
 func TestSessionWindowContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	windower := NewSessionWindow(func(_ int) string { return "all" }, clock.Real).
+	windower := NewSessionWindow(func(_ int) string { return "all" }, RealClock).
 		WithGap(100 * time.Millisecond)
 
 	input := make(chan int)
@@ -280,7 +278,7 @@ func TestSessionWindowContextCancellation(t *testing.T) {
 func TestSessionWindowTimeWindows(t *testing.T) {
 	ctx := context.Background()
 
-	windower := NewSessionWindow(func(_ int) string { return "all" }, clock.Real).WithGap(100 * time.Millisecond)
+	windower := NewSessionWindow(func(_ int) string { return "all" }, RealClock).WithGap(100 * time.Millisecond)
 
 	input := make(chan int)
 	output := windower.Process(ctx, input)
@@ -349,7 +347,7 @@ func TestSessionWindowTimeWindows(t *testing.T) {
 func BenchmarkSessionWindow(b *testing.B) {
 	ctx := context.Background()
 
-	windower := NewSessionWindow(func(_ int) string { return "all" }, clock.Real).WithGap(10 * time.Millisecond)
+	windower := NewSessionWindow(func(_ int) string { return "all" }, RealClock).WithGap(10 * time.Millisecond)
 
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -385,7 +383,7 @@ func ExampleSessionWindow() {
 
 	// In practice, you'd use a longer timeout like 30 minutes.
 	// Using 100ms for example brevity.
-	sessionTracker := NewSessionWindow(func(a UserAction) string { return a.UserID }, clock.Real).
+	sessionTracker := NewSessionWindow(func(a UserAction) string { return a.UserID }, RealClock).
 		WithGap(100 * time.Millisecond).
 		WithName("user-sessions")
 

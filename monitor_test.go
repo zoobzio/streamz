@@ -6,9 +6,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"streamz/clock"
-	clocktesting "streamz/clock/testing"
 )
 
 func TestMonitor(t *testing.T) {
@@ -16,7 +13,7 @@ func TestMonitor(t *testing.T) {
 	in := make(chan int, 100) // Buffered to avoid blocking
 
 	var stats atomic.Value
-	clk := clocktesting.NewFakeClock(time.Now())
+	clk := NewFakeClock(time.Now())
 	monitor := NewMonitor[int](100*time.Millisecond, clk).OnStats(func(s StreamStats) {
 		stats.Store(s)
 	})
@@ -72,7 +69,7 @@ func TestMonitorRate(t *testing.T) {
 
 	var mu sync.Mutex
 	rates := []float64{}
-	monitor := NewMonitor[int](50*time.Millisecond, clock.Real).OnStats(func(s StreamStats) {
+	monitor := NewMonitor[int](50*time.Millisecond, RealClock).OnStats(func(s StreamStats) {
 		if s.Rate > 0 {
 			mu.Lock()
 			rates = append(rates, s.Rate)

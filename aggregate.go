@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"sync"
 	"time"
-
-	"streamz/clock"
 )
 
 // AggregateFunc combines multiple items into a single aggregated value.
@@ -53,7 +51,7 @@ type AggregateWindow[A any] struct { //nolint:govet // logical field grouping pr
 //	    func(sum, n int) int {      // Aggregation function.
 //	        return sum + n
 //	    },
-//	    clock.Real,
+//	    Real,
 //	).WithTimeWindow(time.Minute)
 //
 //	windows := summer.Process(ctx, numbers)
@@ -82,7 +80,7 @@ type Aggregate[T, A any] struct { //nolint:govet // logical field grouping prefe
 	// Metadata.
 	name      string
 	emitEmpty bool // Whether to emit windows with no data.
-	clock     clock.Clock
+	clock     Clock
 }
 
 // NewAggregate creates a processor that performs stateful aggregation.
@@ -100,7 +98,7 @@ type Aggregate[T, A any] struct { //nolint:govet // logical field grouping prefe
 //   - clock: Clock interface for time operations
 //
 // Returns: A new Aggregate processor with fluent configuration methods.
-func NewAggregate[T, A any](initial A, aggregator AggregateFunc[T, A], clock clock.Clock) *Aggregate[T, A] {
+func NewAggregate[T, A any](initial A, aggregator AggregateFunc[T, A], clock Clock) *Aggregate[T, A] {
 	return &Aggregate[T, A]{
 		initial:    initial,
 		aggregator: aggregator,
@@ -159,7 +157,7 @@ func (a *Aggregate[T, A]) Process(ctx context.Context, in <-chan T) <-chan Aggre
 		defer close(out)
 
 		// Set up time-based emission if configured
-		var ticker clock.Ticker
+		var ticker Ticker
 		var tickerChan <-chan time.Time
 
 		if a.maxLatency > 0 {

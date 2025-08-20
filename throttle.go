@@ -3,8 +3,6 @@ package streamz
 import (
 	"context"
 	"time"
-
-	"streamz/clock"
 )
 
 // Throttle limits the rate of items passing through the stream.
@@ -12,7 +10,7 @@ import (
 //nolint:govet // fieldalignment: struct layout optimized for readability
 type Throttle[T any] struct {
 	name  string
-	clock clock.Clock
+	clock Clock
 	rps   float64
 }
 
@@ -28,17 +26,17 @@ type Throttle[T any] struct {
 // Example:
 //
 //	// Limit API calls to 10 per second
-//	throttle := streamz.NewThrottle[APIRequest](10.0, clock.Real)
+//	throttle := streamz.NewThrottle[APIRequest](10.0, Real)
 //	throttled := throttle.Process(ctx, requests)
 //
 //	// Process at most 100 items per second
-//	throttle := streamz.NewThrottle[Event](100.0, clock.Real)
+//	throttle := streamz.NewThrottle[Event](100.0, Real)
 //	controlled := throttle.Process(ctx, events)
 //
 // Parameters:
 //   - rps: Maximum requests (items) per second
 //   - clock: Clock interface for time operations
-func NewThrottle[T any](rps float64, clock clock.Clock) *Throttle[T] {
+func NewThrottle[T any](rps float64, clock Clock) *Throttle[T] {
 	return &Throttle[T]{
 		rps:   rps,
 		name:  "throttle",

@@ -6,8 +6,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"streamz/clock"
 )
 
 // DLQItem represents an item that failed processing and was sent to the DLQ.
@@ -74,7 +72,7 @@ type DeadLetterQueue[T any] struct { //nolint:govet // logical field grouping pr
 	maxRetries      int
 	retryDelay      time.Duration
 	continueOnError bool
-	clock           clock.Clock
+	clock           Clock
 
 	// Error classification.
 	shouldRetry func(error) bool
@@ -112,7 +110,7 @@ type DeadLetterQueue[T any] struct { //nolint:govet // logical field grouping pr
 //   - clock: Clock interface for time operations
 //
 // Returns a new DeadLetterQueue with fluent configuration methods.
-func NewDeadLetterQueue[T any](processor Processor[T, T], clock clock.Clock) *DeadLetterQueue[T] {
+func NewDeadLetterQueue[T any](processor Processor[T, T], clock Clock) *DeadLetterQueue[T] {
 	dlq := &DeadLetterQueue[T]{
 		processor:        processor,
 		name:             "dlq",

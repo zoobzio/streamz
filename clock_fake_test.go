@@ -1,14 +1,12 @@
-// Package testing provides a fake clock implementation for deterministic testing.
-package testing
+// Package streamz provides a fake clock implementation for deterministic testing.
+package streamz
 
 import (
 	"sync"
 	"time"
-
-	"streamz/clock"
 )
 
-// FakeClock implements clock.Clock for testing purposes.
+// FakeClock implements Clock for testing purposes.
 // It allows manual control of time progression.
 //
 //nolint:govet // fieldalignment: struct layout optimized for readability
@@ -61,7 +59,7 @@ func (f *FakeClock) After(d time.Duration) <-chan time.Time {
 }
 
 // AfterFunc waits for the duration to elapse and then executes f.
-func (f *FakeClock) AfterFunc(d time.Duration, fn func()) clock.Timer {
+func (f *FakeClock) AfterFunc(d time.Duration, fn func()) Timer {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -80,7 +78,7 @@ func (f *FakeClock) AfterFunc(d time.Duration, fn func()) clock.Timer {
 }
 
 // NewTimer creates a new Timer.
-func (f *FakeClock) NewTimer(d time.Duration) clock.Timer {
+func (f *FakeClock) NewTimer(d time.Duration) Timer {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -101,7 +99,7 @@ func (f *FakeClock) NewTimer(d time.Duration) clock.Timer {
 }
 
 // NewTicker returns a new Ticker.
-func (f *FakeClock) NewTicker(d time.Duration) clock.Ticker {
+func (f *FakeClock) NewTicker(d time.Duration) Ticker {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -209,7 +207,7 @@ func (f *FakeClock) setTimeLocked(t time.Time) {
 	f.waiters = newWaiters
 }
 
-// fakeTimer implements clock.Timer.
+// fakeTimer implements Timer.
 type fakeTimer struct {
 	clock  *FakeClock
 	waiter *waiter
@@ -242,7 +240,7 @@ func (t *fakeTimer) C() <-chan time.Time {
 	return t.waiter.destChan
 }
 
-// fakeTicker implements clock.Ticker.
+// fakeTicker implements Ticker.
 type fakeTicker struct {
 	clock  *FakeClock
 	waiter *waiter

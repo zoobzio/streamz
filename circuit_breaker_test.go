@@ -7,9 +7,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"streamz/clock"
-	clocktesting "streamz/clock/testing"
 )
 
 // TestCircuitBreakerBasicStates tests basic state transitions.
@@ -18,7 +15,7 @@ func TestCircuitBreakerBasicStates(t *testing.T) {
 
 	// Create a processor that we can control
 	processor := NewTestProcessor("test")
-	cb := NewCircuitBreaker(processor, clock.Real).
+	cb := NewCircuitBreaker(processor, RealClock).
 		FailureThreshold(0.5).
 		MinRequests(2).
 		RecoveryTimeout(100 * time.Millisecond)
@@ -54,7 +51,7 @@ func TestCircuitBreakerOpensOnFailures(t *testing.T) {
 	processor := NewTestProcessor("test")
 
 	var stateChanges []string
-	cb := NewCircuitBreaker(processor, clock.Real).
+	cb := NewCircuitBreaker(processor, RealClock).
 		FailureThreshold(0.5).
 		MinRequests(2). // Lower for easier testing
 		OnStateChange(func(from, to State) {
@@ -102,7 +99,7 @@ func TestCircuitBreakerRecovery(t *testing.T) {
 	ctx := context.Background()
 
 	processor := NewTestProcessor("test")
-	clk := clocktesting.NewFakeClock(time.Now())
+	clk := NewFakeClock(time.Now())
 	cb := NewCircuitBreaker(processor, clk).
 		FailureThreshold(0.5).
 		MinRequests(2).
@@ -158,7 +155,7 @@ func TestCircuitBreakerHalfOpenFailure(t *testing.T) {
 	processor := NewTestProcessor("test")
 
 	var stateChanges []string
-	cb := NewCircuitBreaker(processor, clock.Real).
+	cb := NewCircuitBreaker(processor, RealClock).
 		FailureThreshold(0.5).
 		MinRequests(2).
 		RecoveryTimeout(50 * time.Millisecond).
@@ -209,7 +206,7 @@ func TestCircuitBreakerConcurrency(t *testing.T) {
 	ctx := context.Background()
 
 	processor := NewTestProcessor("test")
-	cb := NewCircuitBreaker(processor, clock.Real).
+	cb := NewCircuitBreaker(processor, RealClock).
 		FailureThreshold(0.5).
 		MinRequests(10)
 
@@ -265,7 +262,7 @@ func TestCircuitBreakerMinRequests(t *testing.T) {
 	ctx := context.Background()
 
 	processor := NewTestProcessor("test").WithFailures(100) // Always fail
-	cb := NewCircuitBreaker(processor, clock.Real).
+	cb := NewCircuitBreaker(processor, RealClock).
 		FailureThreshold(0.5).
 		MinRequests(5) // Need 5 requests before opening
 
@@ -306,7 +303,7 @@ func TestCircuitBreakerCallbacks(t *testing.T) {
 	var openStats CircuitStats
 	var stateChanges []string
 
-	cb := NewCircuitBreaker(processor, clock.Real).
+	cb := NewCircuitBreaker(processor, RealClock).
 		FailureThreshold(0.5).
 		MinRequests(2).
 		OnStateChange(func(from, to State) {
@@ -349,7 +346,7 @@ func TestCircuitBreakerCallbacks(t *testing.T) {
 func TestCircuitBreakerFluentAPI(t *testing.T) {
 	processor := NewTestProcessor("test")
 
-	cb := NewCircuitBreaker(processor, clock.Real).
+	cb := NewCircuitBreaker(processor, RealClock).
 		FailureThreshold(0.7).
 		MinRequests(20).
 		RecoveryTimeout(60 * time.Second).
@@ -376,7 +373,7 @@ func TestCircuitBreakerFluentAPI(t *testing.T) {
 // TestCircuitBreakerParameterValidation tests parameter bounds.
 func TestCircuitBreakerParameterValidation(t *testing.T) {
 	processor := NewTestProcessor("test")
-	cb := NewCircuitBreaker(processor, clock.Real)
+	cb := NewCircuitBreaker(processor, RealClock)
 
 	// Test threshold bounds
 	cb.FailureThreshold(-0.1)
@@ -413,7 +410,7 @@ func TestCircuitBreakerGetStats(t *testing.T) {
 	ctx := context.Background()
 
 	processor := NewTestProcessor("test")
-	cb := NewCircuitBreaker(processor, clock.Real)
+	cb := NewCircuitBreaker(processor, RealClock)
 
 	// Process some successful requests
 	processor.WithFailures(0)
@@ -472,7 +469,7 @@ func TestCircuitBreakerStateStrings(t *testing.T) {
 func BenchmarkCircuitBreakerClosed(b *testing.B) {
 	ctx := context.Background()
 	processor := NewTestProcessor("bench")
-	cb := NewCircuitBreaker(processor, clock.Real)
+	cb := NewCircuitBreaker(processor, RealClock)
 
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -493,7 +490,7 @@ func BenchmarkCircuitBreakerClosed(b *testing.B) {
 func BenchmarkCircuitBreakerOpen(b *testing.B) {
 	ctx := context.Background()
 	processor := NewTestProcessor("bench").WithFailures(1000)
-	cb := NewCircuitBreaker(processor, clock.Real).MinRequests(1)
+	cb := NewCircuitBreaker(processor, RealClock).MinRequests(1)
 
 	// Force circuit open
 	input := make(chan int, 10)
@@ -530,7 +527,7 @@ func ExampleCircuitBreaker() {
 	processor := NewTestProcessor("api")
 
 	// Wrap with circuit breaker
-	protected := NewCircuitBreaker(processor, clock.Real).
+	protected := NewCircuitBreaker(processor, RealClock).
 		FailureThreshold(0.5).
 		MinRequests(10).
 		WithName("api-protection")
@@ -553,7 +550,7 @@ func ExampleCircuitBreaker_monitoring() {
 	ctx := context.Background()
 
 	processor := NewTestProcessor("service")
-	cb := NewCircuitBreaker(processor, clock.Real).
+	cb := NewCircuitBreaker(processor, RealClock).
 		OnStateChange(func(from, to State) {
 			fmt.Printf("State changed: %s -> %s\n", from, to)
 		}).

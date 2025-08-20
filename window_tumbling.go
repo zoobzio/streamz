@@ -3,8 +3,6 @@ package streamz
 import (
 	"context"
 	"time"
-
-	"streamz/clock"
 )
 
 // TumblingWindow groups items into fixed-size, non-overlapping time windows.
@@ -14,7 +12,7 @@ import (
 //nolint:govet // fieldalignment: struct layout optimized for readability
 type TumblingWindow[T any] struct {
 	name  string
-	clock clock.Clock
+	clock Clock
 	size  time.Duration
 }
 
@@ -32,7 +30,7 @@ type TumblingWindow[T any] struct {
 // Example:
 //
 //	// Aggregate events into 1-minute windows
-//	window := streamz.NewTumblingWindow[Event](time.Minute, clock.Real)
+//	window := streamz.NewTumblingWindow[Event](time.Minute, Real)
 //
 //	windows := window.Process(ctx, events)
 //	for w := range windows {
@@ -45,7 +43,7 @@ type TumblingWindow[T any] struct {
 //	}
 //
 //	// Hourly report generation
-//	hourly := streamz.NewTumblingWindow[Metric](time.Hour, clock.Real)
+//	hourly := streamz.NewTumblingWindow[Metric](time.Hour, Real)
 //	reports := hourly.Process(ctx, metrics)
 //	for window := range reports {
 //		generateHourlyReport(window)
@@ -56,7 +54,7 @@ type TumblingWindow[T any] struct {
 //   - clock: Clock interface for time operations
 //
 // Returns a new TumblingWindow processor for time-based grouping.
-func NewTumblingWindow[T any](size time.Duration, clock clock.Clock) *TumblingWindow[T] {
+func NewTumblingWindow[T any](size time.Duration, clock Clock) *TumblingWindow[T] {
 	return &TumblingWindow[T]{
 		size:  size,
 		name:  "tumbling-window",

@@ -8,8 +8,6 @@ import (
 	"math/big"
 	"strings"
 	"time"
-
-	"streamz/clock"
 )
 
 // Retry wraps any processor and automatically retries failed operations using
@@ -78,7 +76,7 @@ type Retry[T any] struct { //nolint:govet // logical field grouping preferred ov
 	withJitter  bool
 	name        string
 	onError     func(error, int) bool // Custom retry logic: (error, attempt) -> shouldRetry.
-	clock       clock.Clock
+	clock       Clock
 }
 
 // NewRetry creates a processor that wraps another processor with retry logic.
@@ -98,7 +96,7 @@ type Retry[T any] struct { //nolint:govet // logical field grouping preferred ov
 //   - clock: Clock interface for time operations
 //
 // Returns a new Retry processor with fluent configuration methods.
-func NewRetry[T any](processor Processor[T, T], clock clock.Clock) *Retry[T] {
+func NewRetry[T any](processor Processor[T, T], clock Clock) *Retry[T] {
 	return &Retry[T]{
 		processor:   processor,
 		clock:       clock,

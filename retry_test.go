@@ -7,9 +7,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"streamz/clock"
-	clocktesting "streamz/clock/testing"
 )
 
 // TestProcessor implements Processor interface for testing retry logic.
@@ -95,7 +92,7 @@ func TestRetryBasicFunctionality(t *testing.T) {
 
 	// Create a processor that fails twice then succeeds
 	processor := NewTestProcessor("test").WithFailures(2)
-	retry := NewRetry(processor, clock.Real).
+	retry := NewRetry(processor, RealClock).
 		MaxAttempts(3).
 		BaseDelay(1 * time.Millisecond) // Fast for testing
 
@@ -125,7 +122,7 @@ func TestRetryMaxAttemptsExceeded(t *testing.T) {
 
 	// Create a processor that always fails
 	processor := NewTestProcessor("test").WithFailures(10)
-	retry := NewRetry(processor, clock.Real).
+	retry := NewRetry(processor, RealClock).
 		MaxAttempts(3).
 		BaseDelay(1 * time.Millisecond)
 
@@ -154,7 +151,7 @@ func TestRetrySuccessOnFirstAttempt(t *testing.T) {
 
 	// Create a processor that never fails
 	processor := NewTestProcessor("test").WithFailures(0)
-	retry := NewRetry(processor, clock.Real)
+	retry := NewRetry(processor, RealClock)
 
 	input := make(chan int, 1)
 	input <- 5
@@ -181,7 +178,7 @@ func TestRetryMultipleItems(t *testing.T) {
 
 	// Create a processor that succeeds on all items (no failures)
 	processor := NewTestProcessor("test").WithFailures(0)
-	retry := NewRetry(processor, clock.Real).
+	retry := NewRetry(processor, RealClock).
 		MaxAttempts(2).
 		BaseDelay(1 * time.Millisecond)
 
@@ -220,7 +217,7 @@ func TestRetryContextCancellation(t *testing.T) {
 
 	// Create a processor that always fails
 	processor := NewTestProcessor("test").WithFailures(10)
-	retry := NewRetry(processor, clock.Real).
+	retry := NewRetry(processor, RealClock).
 		MaxAttempts(5).
 		BaseDelay(100 * time.Millisecond) // Longer delay to test cancellation
 
@@ -259,7 +256,7 @@ func TestRetryExponentialBackoff(t *testing.T) {
 	ctx := context.Background()
 
 	processor := NewTestProcessor("test").WithFailures(3)
-	clk := clocktesting.NewFakeClock(time.Now())
+	clk := NewFakeClock(time.Now())
 	retry := NewRetry(processor, clk).
 		MaxAttempts(4).
 		BaseDelay(10 * time.Millisecond).
@@ -302,7 +299,7 @@ func TestRetryExponentialBackoff(t *testing.T) {
 }
 
 func TestRetryMaxDelay(t *testing.T) {
-	retry := NewRetry(NewTestProcessor("test"), clock.Real).
+	retry := NewRetry(NewTestProcessor("test"), RealClock).
 		BaseDelay(100 * time.Millisecond).
 		MaxDelay(150 * time.Millisecond).
 		WithJitter(false)
@@ -320,7 +317,7 @@ func TestRetryMaxDelay(t *testing.T) {
 }
 
 func TestRetryJitter(t *testing.T) {
-	retry := NewRetry(NewTestProcessor("test"), clock.Real).
+	retry := NewRetry(NewTestProcessor("test"), RealClock).
 		BaseDelay(100 * time.Millisecond).
 		WithJitter(true)
 
@@ -359,7 +356,7 @@ func TestRetryCustomErrorHandler(t *testing.T) {
 
 	var errorCallCount int
 	processor := NewTestProcessor("test").WithFailures(5)
-	retry := NewRetry(processor, clock.Real).
+	retry := NewRetry(processor, RealClock).
 		MaxAttempts(5).
 		BaseDelay(1 * time.Millisecond).
 		OnError(func(_ error, attempt int) bool {
@@ -392,7 +389,7 @@ func TestRetryFluentAPI(t *testing.T) {
 	processor := NewTestProcessor("test")
 
 	// Test that fluent API returns the same instance
-	retry := NewRetry(processor, clock.Real).
+	retry := NewRetry(processor, RealClock).
 		MaxAttempts(5).
 		BaseDelay(200 * time.Millisecond).
 		MaxDelay(10 * time.Second).
@@ -418,7 +415,7 @@ func TestRetryFluentAPI(t *testing.T) {
 
 func TestRetryName(t *testing.T) {
 	processor := NewTestProcessor("test")
-	retry := NewRetry(processor, clock.Real)
+	retry := NewRetry(processor, RealClock)
 
 	// Default name
 	if retry.Name() != "retry" {
@@ -434,7 +431,7 @@ func TestRetryName(t *testing.T) {
 
 func TestRetryParameterValidation(t *testing.T) {
 	processor := NewTestProcessor("test")
-	retry := NewRetry(processor, clock.Real)
+	retry := NewRetry(processor, RealClock)
 
 	// Test parameter bounds
 	retry.MaxAttempts(-1)
@@ -494,7 +491,7 @@ func TestRetryErrorClassification(t *testing.T) {
 func BenchmarkRetrySuccessfulProcessing(b *testing.B) {
 	ctx := context.Background()
 	processor := NewTestProcessor("bench")
-	retry := NewRetry(processor, clock.Real)
+	retry := NewRetry(processor, RealClock)
 
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -519,7 +516,7 @@ func BenchmarkRetryWithFailures(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		processor := NewTestProcessor("bench").WithFailures(2) // Fail twice
-		retry := NewRetry(processor, clock.Real).
+		retry := NewRetry(processor, RealClock).
 			MaxAttempts(3).
 			BaseDelay(1 * time.Microsecond) // Minimal delay for benchmarking
 
@@ -542,7 +539,7 @@ func ExampleRetry() {
 	processor := NewTestProcessor("example").WithFailures(1)
 
 	// Wrap with retry logic
-	retry := NewRetry(processor, clock.Real).
+	retry := NewRetry(processor, RealClock).
 		MaxAttempts(3).
 		BaseDelay(100 * time.Millisecond).
 		WithName("example-retry")
@@ -565,7 +562,7 @@ func ExampleRetry_customErrorHandling() {
 	ctx := context.Background()
 
 	processor := NewTestProcessor("example")
-	retry := NewRetry(processor, clock.Real).
+	retry := NewRetry(processor, RealClock).
 		MaxAttempts(3).
 		OnError(func(err error, attempt int) bool {
 			// Custom retry logic

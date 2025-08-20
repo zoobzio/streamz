@@ -4,8 +4,6 @@ import (
 	"context"
 	"sync"
 	"time"
-
-	"streamz/clock"
 )
 
 // Dedupe removes duplicate items from a stream based on a key function.
@@ -14,7 +12,7 @@ import (
 //nolint:govet // fieldalignment: struct layout optimized for readability
 type Dedupe[T any, K comparable] struct {
 	name    string
-	clock   clock.Clock
+	clock   Clock
 	keyFunc func(T) K
 	seen    map[K]time.Time
 	mu      sync.Mutex
@@ -36,17 +34,17 @@ type Dedupe[T any, K comparable] struct {
 //	// Deduplicate events by ID (infinite memory by default)
 //	dedupe := streamz.NewDedupe(func(e Event) string {
 //		return e.ID
-//	}, clock.Real)
+//	}, Real)
 //
 //	// With time-based expiration
 //	dedupe := streamz.NewDedupe(func(e Event) string {
 //		return e.ID
-//	}, clock.Real).WithTTL(5*time.Minute)
+//	}, Real).WithTTL(5*time.Minute)
 //
 //	// Deduplicate integers by value
 //	dedupe := streamz.NewDedupe(func(n int) int {
 //		return n
-//	}, clock.Real).WithTTL(time.Hour)
+//	}, Real).WithTTL(time.Hour)
 //
 //	unique := dedupe.Process(ctx, events)
 //
@@ -55,7 +53,7 @@ type Dedupe[T any, K comparable] struct {
 //   - clock: Clock interface for time operations
 //
 // Returns a new Dedupe processor with fluent configuration.
-func NewDedupe[T any, K comparable](keyFunc func(T) K, clock clock.Clock) *Dedupe[T, K] {
+func NewDedupe[T any, K comparable](keyFunc func(T) K, clock Clock) *Dedupe[T, K] {
 	return &Dedupe[T, K]{
 		keyFunc: keyFunc,
 		ttl:     0, // 0 means infinite (no expiration)
@@ -86,7 +84,7 @@ func (d *Dedupe[T, K]) Process(ctx context.Context, in <-chan T) <-chan T {
 		defer close(out)
 
 		// Only create ticker if TTL is set
-		var ticker clock.Ticker
+		var ticker Ticker
 		var tickerChan <-chan time.Time
 		if d.ttl > 0 {
 			ticker = d.clock.NewTicker(d.ttl / 2)

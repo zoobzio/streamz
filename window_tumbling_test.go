@@ -5,16 +5,13 @@ import (
 	"fmt"
 	"testing"
 	"time"
-
-	"streamz/clock"
-	clocktesting "streamz/clock/testing"
 )
 
 func TestTumblingWindow(t *testing.T) {
 	ctx := context.Background()
 	in := make(chan int)
 
-	clk := clocktesting.NewFakeClock(time.Now())
+	clk := NewFakeClock(time.Now())
 	window := NewTumblingWindow[int](100*time.Millisecond, clk)
 	out := window.Process(ctx, in)
 
@@ -65,7 +62,7 @@ func ExampleTumblingWindow() {
 	ctx := context.Background()
 
 	// Aggregate metrics into 1-minute windows.
-	window := NewTumblingWindow[float64](time.Minute, clock.Real)
+	window := NewTumblingWindow[float64](time.Minute, RealClock)
 
 	// Simulate metric stream.
 	metrics := make(chan float64)

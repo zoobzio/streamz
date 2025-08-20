@@ -2,8 +2,6 @@ package streamz
 
 import (
 	"context"
-
-	"streamz/clock"
 )
 
 // Batcher collects items from a stream and groups them into batches based on size or time constraints.
@@ -15,7 +13,7 @@ import (
 type Batcher[T any] struct {
 	config BatchConfig
 	name   string
-	clock  clock.Clock
+	clock  Clock
 }
 
 // NewBatcher creates a processor that intelligently groups items into batches.
@@ -35,7 +33,7 @@ type Batcher[T any] struct {
 //	batcher := streamz.NewBatcher[Event](streamz.BatchConfig{
 //		MaxSize:    1000,
 //		MaxLatency: 5 * time.Second,
-//	}, clock.Real)
+//	}, Real)
 //
 //	batches := batcher.Process(ctx, events)
 //	for batch := range batches {
@@ -48,14 +46,14 @@ type Batcher[T any] struct {
 //	apiBatcher := streamz.NewBatcher[Request](streamz.BatchConfig{
 //		MaxSize:    100,  // API limit
 //		MaxLatency: 100 * time.Millisecond, // Max acceptable delay
-//	}, clock.Real)
+//	}, Real)
 //
 // Parameters:
 //   - config: Batch configuration with size and latency constraints
 //   - clock: Clock interface for time operations
 //
 // Returns a new Batcher processor that groups items efficiently.
-func NewBatcher[T any](config BatchConfig, clock clock.Clock) *Batcher[T] {
+func NewBatcher[T any](config BatchConfig, clock Clock) *Batcher[T] {
 	return &Batcher[T]{
 		config: config,
 		name:   "batcher",

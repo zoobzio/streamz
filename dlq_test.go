@@ -9,9 +9,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"streamz/clock"
-	clocktesting "streamz/clock/testing"
 )
 
 // failingProcessor for test - fails a configurable number of times.
@@ -73,7 +70,7 @@ func TestDLQBasicFunctionality(t *testing.T) {
 	processor := newFailingProcessor("test", 2)
 
 	var failedItems []DLQItem[int]
-	dlq := NewDeadLetterQueue(processor, clock.Real).
+	dlq := NewDeadLetterQueue(processor, RealClock).
 		OnFailure(func(_ context.Context, item DLQItem[int]) {
 			failedItems = append(failedItems, item)
 		})
@@ -133,7 +130,7 @@ func TestDLQWithRetries(t *testing.T) {
 	// Processor that fails first 2 attempts for each item
 	processor := newFailingProcessor("test", 2)
 
-	clk := clocktesting.NewFakeClock(time.Now())
+	clk := NewFakeClock(time.Now())
 	var retryLog []string
 	dlq := NewDeadLetterQueue(processor, clk).
 		MaxRetries(3).
@@ -196,7 +193,7 @@ func TestDLQMaxRetriesExceeded(t *testing.T) {
 	processor := newFailingProcessor("test", 100)
 
 	var failedItems []DLQItem[int]
-	dlq := NewDeadLetterQueue(processor, clock.Real).
+	dlq := NewDeadLetterQueue(processor, RealClock).
 		MaxRetries(2).
 		RetryDelay(1 * time.Millisecond).
 		OnFailure(func(_ context.Context, item DLQItem[int]) {
@@ -240,7 +237,7 @@ func TestDLQFailedItemsChannel(t *testing.T) {
 	ctx := context.Background()
 
 	processor := newFailingProcessor("test", 3)
-	dlq := NewDeadLetterQueue(processor, clock.Real).
+	dlq := NewDeadLetterQueue(processor, RealClock).
 		WithFailedBufferSize(10)
 
 	input := make(chan int, 5)
@@ -290,7 +287,7 @@ func TestDLQContinueOnError(t *testing.T) {
 
 	t.Run("ContinueOnError=true", func(t *testing.T) {
 		processor := newFailingProcessor("test", 2)
-		dlq := NewDeadLetterQueue(processor, clock.Real).
+		dlq := NewDeadLetterQueue(processor, RealClock).
 			ContinueOnError(true) // Default
 
 		input := make(chan int, 5)
@@ -314,7 +311,7 @@ func TestDLQContinueOnError(t *testing.T) {
 
 	t.Run("ContinueOnError=false", func(t *testing.T) {
 		processor := newFailingProcessor("test", 1)
-		dlq := NewDeadLetterQueue(processor, clock.Real).
+		dlq := NewDeadLetterQueue(processor, RealClock).
 			ContinueOnError(false)
 
 		input := make(chan int)
@@ -359,7 +356,7 @@ func TestDLQShouldRetry(t *testing.T) {
 	}
 
 	var retryLog []string
-	dlq := NewDeadLetterQueue(customProcessor, clock.Real).
+	dlq := NewDeadLetterQueue(customProcessor, RealClock).
 		MaxRetries(5).
 		ShouldRetry(func(err error) bool {
 			// Only retry network errors
@@ -423,7 +420,7 @@ func TestDLQContextCancellation(t *testing.T) {
 		return out
 	})
 
-	dlq := NewDeadLetterQueue(slowProcessor, clock.Real)
+	dlq := NewDeadLetterQueue(slowProcessor, RealClock)
 
 	input := make(chan int)
 	go func() {
@@ -473,7 +470,7 @@ func TestDLQContextCancellation(t *testing.T) {
 func TestDLQFluentAPI(t *testing.T) {
 	processor := NewTestProcessor("test")
 
-	dlq := NewDeadLetterQueue(processor, clock.Real).
+	dlq := NewDeadLetterQueue(processor, RealClock).
 		MaxRetries(5).
 		RetryDelay(2 * time.Second).
 		ContinueOnError(false).
@@ -522,7 +519,7 @@ func TestDLQStats(t *testing.T) {
 		return out
 	})
 
-	dlq := NewDeadLetterQueue(specificFailProcessor, clock.Real).
+	dlq := NewDeadLetterQueue(specificFailProcessor, RealClock).
 		MaxRetries(1)
 
 	input := make(chan int, 10)
@@ -583,7 +580,7 @@ func TestDLQConcurrency(t *testing.T) {
 		return out
 	})
 
-	dlq := NewDeadLetterQueue(randomProcessor, clock.Real).
+	dlq := NewDeadLetterQueue(randomProcessor, RealClock).
 		OnFailure(func(_ context.Context, item DLQItem[int]) {
 			mu.Lock()
 			failedItems = append(failedItems, item.Item)
@@ -642,7 +639,7 @@ func TestDLQConcurrency(t *testing.T) {
 func BenchmarkDLQNoFailures(b *testing.B) {
 	ctx := context.Background()
 	processor := NewTestProcessor("bench")
-	dlq := NewDeadLetterQueue(processor, clock.Real)
+	dlq := NewDeadLetterQueue(processor, RealClock)
 
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -663,7 +660,7 @@ func BenchmarkDLQNoFailures(b *testing.B) {
 func BenchmarkDLQWithRetries(b *testing.B) {
 	ctx := context.Background()
 	processor := newFailingProcessor("bench", 1) // Fail once
-	dlq := NewDeadLetterQueue(processor, clock.Real).
+	dlq := NewDeadLetterQueue(processor, RealClock).
 		MaxRetries(2).
 		RetryDelay(0) // No delay for benchmark
 
@@ -743,7 +740,7 @@ func ExampleDeadLetterQueue() {
 	processor := NewTestProcessor("api-calls")
 
 	// Wrap with DLQ
-	dlq := NewDeadLetterQueue(processor, clock.Real).
+	dlq := NewDeadLetterQueue(processor, RealClock).
 		MaxRetries(3).
 		OnFailure(func(_ context.Context, item DLQItem[int]) {
 			fmt.Printf("Failed to process: %d after %d attempts\n",

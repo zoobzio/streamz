@@ -4,8 +4,6 @@ import (
 	"context"
 	"sync/atomic"
 	"time"
-
-	"streamz/clock"
 )
 
 // StreamStats contains statistics about items flowing through a monitored stream.
@@ -28,7 +26,7 @@ type Monitor[T any] struct { //nolint:govet // logical field grouping preferred 
 	name     string
 	interval time.Duration
 	count    atomic.Int64
-	clock    clock.Clock
+	clock    Clock
 }
 
 // NewMonitor creates a pass-through processor that observes stream performance.
@@ -73,7 +71,7 @@ type Monitor[T any] struct { //nolint:govet // logical field grouping preferred 
 //   - clock: Clock interface for time operations
 //
 // Returns a new Monitor processor with fluent configuration.
-func NewMonitor[T any](interval time.Duration, clock clock.Clock) *Monitor[T] {
+func NewMonitor[T any](interval time.Duration, clock Clock) *Monitor[T] {
 	m := &Monitor[T]{
 		name:     "monitor",
 		interval: interval,

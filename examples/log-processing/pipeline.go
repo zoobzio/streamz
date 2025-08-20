@@ -6,8 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"streamz"
-	"streamz/clock"
+	"github.com/zoobzio/streamz"
 )
 
 // Global pipeline configuration that evolves through sprints.
@@ -102,7 +101,7 @@ func processBatched(ctx context.Context, logs <-chan LogEntry) error {
 	batcher := streamz.NewBatcher[LogEntry](streamz.BatchConfig{
 		MaxSize:    BatchSize,
 		MaxLatency: BatchTimeout,
-	})
+	}, streamz.RealClock)
 
 	// Process batches
 	batches := batcher.Process(ctx, metricsProcessor)
@@ -150,7 +149,7 @@ func processWithAlerts(ctx context.Context, logs <-chan LogEntry) error {
 		batcher := streamz.NewBatcher[LogEntry](streamz.BatchConfig{
 			MaxSize:    BatchSize,
 			MaxLatency: BatchTimeout,
-		})
+		}, streamz.RealClock)
 
 		batches := batcher.Process(ctx, streams[0])
 		for batch := range batches {
@@ -217,7 +216,7 @@ func processWithSmartAlerts(ctx context.Context, logs <-chan LogEntry) error {
 		batcher := streamz.NewBatcher[LogEntry](streamz.BatchConfig{
 			MaxSize:    BatchSize,
 			MaxLatency: BatchTimeout,
-		})
+		}, streamz.RealClock)
 
 		batches := batcher.Process(ctx, streams[0])
 		for batch := range batches {
@@ -236,7 +235,7 @@ func processWithSmartAlerts(ctx context.Context, logs <-chan LogEntry) error {
 	// Stream 2: Smart windowed alerting
 	go func() {
 		// Window logs for rate-based detection
-		windower := streamz.NewTumblingWindow[LogEntry](AlertWindow)
+		windower := streamz.NewTumblingWindow[LogEntry](AlertWindow, streamz.RealClock)
 
 		windows := windower.Process(ctx, streams[1])
 
@@ -300,7 +299,7 @@ func processWithSecurity(ctx context.Context, logs <-chan LogEntry) error {
 		batcher := streamz.NewBatcher[LogEntry](streamz.BatchConfig{
 			MaxSize:    BatchSize,
 			MaxLatency: BatchTimeout,
-		})
+		}, streamz.RealClock)
 
 		batches := batcher.Process(ctx, streams[0])
 		for batch := range batches {
@@ -318,7 +317,7 @@ func processWithSecurity(ctx context.Context, logs <-chan LogEntry) error {
 
 	// Stream 2: Smart windowed alerting
 	go func() {
-		windower := streamz.NewTumblingWindow[LogEntry](AlertWindow)
+		windower := streamz.NewTumblingWindow[LogEntry](AlertWindow, streamz.RealClock)
 
 		windows := windower.Process(ctx, streams[1])
 		aggregator := NewWindowAggregator(AlertWindow, ErrorRateThreshold, Alerting)
@@ -340,7 +339,7 @@ func processWithSecurity(ctx context.Context, logs <-chan LogEntry) error {
 		// Deduplicate security alerts (same threat from same IP within 5 minutes)
 		deduper := streamz.NewDedupe(func(alert SecurityAlert) string {
 			return fmt.Sprintf("%s-%s-%s", alert.Pattern, alert.MatchedLog.IP, alert.MatchedLog.UserID)
-		}).WithTTL(5 * time.Minute)
+		}, streamz.RealClock).WithTTL(5 * time.Minute)
 
 		dedupedThreats := deduper.Process(ctx, threats)
 
@@ -386,7 +385,7 @@ func processFullProduction(ctx context.Context, logs <-chan LogEntry) error {
 	metricsProcessor := MetricsCollector.Process(ctx, logs)
 
 	// Add monitoring for observability
-	monitor := streamz.NewMonitor[LogEntry](5*time.Second, clock.Real).OnStats(func(stats streamz.StreamStats) {
+	monitor := streamz.NewMonitor[LogEntry](5*time.Second, streamz.RealClock).OnStats(func(stats streamz.StreamStats) {
 		rate := stats.Rate
 		if TestMode {
 			fmt.Printf("📈 Processing rate: %.0f logs/sec (peak: %.0f)\n", rate, MetricsCollector.GetMetrics().PeakRate)
@@ -433,7 +432,7 @@ func processFullProduction(ctx context.Context, logs <-chan LogEntry) error {
 		adaptiveBatcher := streamz.NewBatcher[LogEntry](streamz.BatchConfig{
 			MaxSize:    BatchSize * 5, // Larger batches for efficiency
 			MaxLatency: BatchTimeout,
-		}, clock.Real)
+		}, streamz.RealClock)
 
 		batches := adaptiveBatcher.Process(ctx, streams[0])
 		for batch := range batches {
@@ -455,7 +454,7 @@ func processFullProduction(ctx context.Context, logs <-chan LogEntry) error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		windower := streamz.NewTumblingWindow[LogEntry](AlertWindow)
+		windower := streamz.NewTumblingWindow[LogEntry](AlertWindow, streamz.RealClock)
 		windows := windower.Process(ctx, streams[1])
 		aggregator := NewWindowAggregator(AlertWindow, ErrorRateThreshold, Alerting)
 		alerts := aggregator.Process(ctx, windows)
@@ -478,7 +477,7 @@ func processFullProduction(ctx context.Context, logs <-chan LogEntry) error {
 		// Deduplicate security alerts (same threat from same IP within 5 minutes)
 		deduper := streamz.NewDedupe(func(alert SecurityAlert) string {
 			return fmt.Sprintf("%s-%s-%s", alert.Pattern, alert.MatchedLog.IP, alert.MatchedLog.UserID)
-		}).WithTTL(5 * time.Minute)
+		}, streamz.RealClock).WithTTL(5 * time.Minute)
 
 		dedupedThreats := deduper.Process(ctx, threats)
 

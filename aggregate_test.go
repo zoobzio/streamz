@@ -6,8 +6,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"streamz/clock"
 )
 
 // TestAggregateSum tests basic sum aggregation.
@@ -15,7 +13,7 @@ func TestAggregateSum(t *testing.T) {
 	ctx := context.Background()
 
 	// Sum with count-based windows
-	summer := NewAggregate(0, Sum[int](), clock.Real).
+	summer := NewAggregate(0, Sum[int](), RealClock).
 		WithCountWindow(3).
 		WithName("summer")
 
@@ -57,7 +55,7 @@ func TestAggregateTimeWindow(t *testing.T) {
 	ctx := context.Background()
 
 	// Use real clock for simpler timing in this test
-	counter := NewAggregate(0, Count[string](), clock.Real).
+	counter := NewAggregate(0, Count[string](), RealClock).
 		WithTimeWindow(50 * time.Millisecond).
 		WithEmptyWindows(false)
 
@@ -122,7 +120,7 @@ func TestAggregateTimeWindow(t *testing.T) {
 func TestAggregateAverage(t *testing.T) {
 	ctx := context.Background()
 
-	averager := NewAggregate(Average{}, Avg[float64](), clock.Real).
+	averager := NewAggregate(Average{}, Avg[float64](), RealClock).
 		WithCountWindow(4)
 
 	input := make(chan float64, 8)
@@ -156,7 +154,7 @@ func TestAggregateAverage(t *testing.T) {
 func TestAggregateMinMax(t *testing.T) {
 	ctx := context.Background()
 
-	minMaxer := NewAggregate(MinMax[int]{}, MinMaxAgg[int](), clock.Real).
+	minMaxer := NewAggregate(MinMax[int]{}, MinMaxAgg[int](), RealClock).
 		WithCountWindow(5)
 
 	input := make(chan int, 10)
@@ -203,7 +201,7 @@ func TestAggregateCustomFunction(t *testing.T) {
 			list.Items = append(list.Items, item)
 			return list
 		},
-		clock.Real,
+		RealClock,
 	).WithCountWindow(3)
 
 	input := make(chan string, 6)
@@ -238,7 +236,7 @@ func TestAggregateMixedTriggers(t *testing.T) {
 	ctx := context.Background()
 
 	// Emit on count OR time
-	summer := NewAggregate(0, Sum[int](), clock.Real).
+	summer := NewAggregate(0, Sum[int](), RealClock).
 		WithCountWindow(5).
 		WithTimeWindow(150 * time.Millisecond)
 
@@ -290,12 +288,12 @@ func TestAggregateEmptyWindows(t *testing.T) {
 	ctx := context.Background()
 
 	// With empty windows
-	counter1 := NewAggregate(0, Count[int](), clock.Real).
+	counter1 := NewAggregate(0, Count[int](), RealClock).
 		WithTimeWindow(50 * time.Millisecond).
 		WithEmptyWindows(true)
 
 	// Without empty windows
-	counter2 := NewAggregate(0, Count[int](), clock.Real).
+	counter2 := NewAggregate(0, Count[int](), RealClock).
 		WithTimeWindow(50 * time.Millisecond).
 		WithEmptyWindows(false)
 
@@ -345,7 +343,7 @@ func TestAggregateEmptyWindows(t *testing.T) {
 func TestAggregateContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	summer := NewAggregate(0, Sum[int](), clock.Real).
+	summer := NewAggregate(0, Sum[int](), RealClock).
 		WithTimeWindow(100 * time.Millisecond)
 
 	input := make(chan int)
@@ -391,7 +389,7 @@ func TestAggregateContextCancellation(t *testing.T) {
 func TestAggregateGetCurrentState(t *testing.T) {
 	ctx := context.Background()
 
-	summer := NewAggregate(0, Sum[int](), clock.Real).
+	summer := NewAggregate(0, Sum[int](), RealClock).
 		WithCountWindow(10) // High count so we can inspect mid-aggregation
 
 	input := make(chan int)
@@ -422,7 +420,7 @@ func TestAggregateEdgeCases(t *testing.T) {
 
 	t.Run("ZeroCountWindow", func(t *testing.T) {
 		// Should default to 1
-		agg := NewAggregate(0, Sum[int](), clock.Real).WithCountWindow(0)
+		agg := NewAggregate(0, Sum[int](), RealClock).WithCountWindow(0)
 		if agg.maxCount != 1 {
 			t.Errorf("expected count window to default to 1, got %d", agg.maxCount)
 		}
@@ -430,14 +428,14 @@ func TestAggregateEdgeCases(t *testing.T) {
 
 	t.Run("NegativeTimeWindow", func(t *testing.T) {
 		// Should default to 0 (disabled)
-		agg := NewAggregate(0, Sum[int](), clock.Real).WithTimeWindow(-1 * time.Second)
+		agg := NewAggregate(0, Sum[int](), RealClock).WithTimeWindow(-1 * time.Second)
 		if agg.maxLatency != 0 {
 			t.Errorf("expected time window to be disabled, got %v", agg.maxLatency)
 		}
 	})
 
 	t.Run("EmptyInput", func(t *testing.T) {
-		summer := NewAggregate(0, Sum[int](), clock.Real).WithCountWindow(5)
+		summer := NewAggregate(0, Sum[int](), RealClock).WithCountWindow(5)
 
 		input := make(chan int)
 		close(input)
@@ -455,7 +453,7 @@ func TestAggregateEdgeCases(t *testing.T) {
 	})
 
 	t.Run("SingleItem", func(t *testing.T) {
-		summer := NewAggregate(0, Sum[int](), clock.Real).WithCountWindow(5)
+		summer := NewAggregate(0, Sum[int](), RealClock).WithCountWindow(5)
 
 		input := make(chan int, 1)
 		input <- 42
@@ -485,7 +483,7 @@ func TestAggregateEdgeCases(t *testing.T) {
 func BenchmarkAggregate(b *testing.B) {
 	ctx := context.Background()
 
-	summer := NewAggregate(0, Sum[int](), clock.Real).WithCountWindow(100)
+	summer := NewAggregate(0, Sum[int](), RealClock).WithCountWindow(100)
 
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -508,7 +506,7 @@ func BenchmarkAggregate(b *testing.B) {
 func BenchmarkAggregateThroughput(b *testing.B) {
 	ctx := context.Background()
 
-	summer := NewAggregate(0, Sum[int](), clock.Real).WithCountWindow(1000)
+	summer := NewAggregate(0, Sum[int](), RealClock).WithCountWindow(1000)
 
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -535,7 +533,7 @@ func ExampleAggregate_timeWindows() {
 	ctx := context.Background()
 
 	// Count events per second
-	counter := NewAggregate(0, Count[string](), clock.Real).
+	counter := NewAggregate(0, Count[string](), RealClock).
 		WithTimeWindow(1 * time.Second).
 		WithName("event-counter")
 
@@ -581,7 +579,7 @@ func ExampleAggregate_custom() {
 			newUsers[userID] = true
 			return newUsers
 		},
-		clock.Real,
+		RealClock,
 	).WithCountWindow(5)
 
 	// User activity stream

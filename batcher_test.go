@@ -6,8 +6,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"streamz/clock"
 )
 
 // TestBatcherBySize tests batching by size.
@@ -19,7 +17,7 @@ func TestBatcherBySize(t *testing.T) {
 		MaxLatency: 1 * time.Hour, // Effectively disabled.
 	}
 
-	batcher := NewBatcher[int](config, clock.Real)
+	batcher := NewBatcher[int](config, RealClock)
 
 	input := make(chan int, 10)
 	for i := 1; i <= 10; i++ {
@@ -73,7 +71,7 @@ func TestBatcherByTime(t *testing.T) {
 		MaxLatency: 50 * time.Millisecond,
 	}
 
-	batcher := NewBatcher[int](config, clock.Real)
+	batcher := NewBatcher[int](config, RealClock)
 
 	input := make(chan int)
 	output := batcher.Process(ctx, input)
@@ -137,7 +135,7 @@ func TestBatcherMixedTriggers(t *testing.T) {
 		MaxLatency: 100 * time.Millisecond,
 	}
 
-	batcher := NewBatcher[string](config, clock.Real)
+	batcher := NewBatcher[string](config, RealClock)
 
 	input := make(chan string)
 	output := batcher.Process(ctx, input)
@@ -198,7 +196,7 @@ func TestBatcherEmptyInput(t *testing.T) {
 		MaxLatency: 100 * time.Millisecond,
 	}
 
-	batcher := NewBatcher[int](config, clock.Real)
+	batcher := NewBatcher[int](config, RealClock)
 
 	input := make(chan int)
 	close(input)
@@ -224,7 +222,7 @@ func TestBatcherSingleItem(t *testing.T) {
 		MaxLatency: 100 * time.Millisecond,
 	}
 
-	batcher := NewBatcher[int](config, clock.Real)
+	batcher := NewBatcher[int](config, RealClock)
 
 	input := make(chan int, 1)
 	input <- 42
@@ -255,7 +253,7 @@ func TestBatcherContextCancellation(t *testing.T) {
 		MaxLatency: 50 * time.Millisecond,
 	}
 
-	batcher := NewBatcher[int](config, clock.Real)
+	batcher := NewBatcher[int](config, RealClock)
 
 	input := make(chan int)
 	output := batcher.Process(ctx, input)
@@ -304,7 +302,7 @@ func TestBatcherConfiguration(t *testing.T) {
 		MaxSize:    0,
 		MaxLatency: 100 * time.Millisecond,
 	}
-	batcher1 := NewBatcher[int](config1, clock.Real)
+	batcher1 := NewBatcher[int](config1, RealClock)
 
 	input1 := make(chan int, 3)
 	input1 <- 1
@@ -331,7 +329,7 @@ func TestBatcherConfiguration(t *testing.T) {
 		MaxSize:    2,
 		MaxLatency: 0,
 	}
-	batcher2 := NewBatcher[int](config2, clock.Real)
+	batcher2 := NewBatcher[int](config2, RealClock)
 
 	input2 := make(chan int, 5)
 	for i := 1; i <= 5; i++ {
@@ -370,7 +368,7 @@ func BenchmarkBatcher(b *testing.B) {
 		MaxLatency: 10 * time.Millisecond,
 	}
 
-	batcher := NewBatcher[int](config, clock.Real)
+	batcher := NewBatcher[int](config, RealClock)
 
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -407,7 +405,7 @@ func ExampleBatcher() {
 		MaxLatency: 500 * time.Millisecond, // Or every 500ms.
 	}
 
-	batcher := NewBatcher[string](config, clock.Real)
+	batcher := NewBatcher[string](config, RealClock)
 
 	// Simulate incoming user events.
 	events := make(chan string, 10)
