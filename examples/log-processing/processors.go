@@ -287,6 +287,7 @@ func (rl *RateLimiter) Process(ctx context.Context, in <-chan LogEntry) <-chan L
 type MetricsCollectorProcessor struct {
 	metrics   *Metrics
 	startTime time.Time
+	mu        sync.RWMutex // Protects rate fields
 }
 
 // NewMetricsCollector creates a new metrics collector.
@@ -325,10 +326,12 @@ func (mc *MetricsCollectorProcessor) Process(ctx context.Context, in <-chan LogE
 				// Update rate every second
 				if time.Since(lastRateCalc) >= time.Second {
 					rate := float64(count) / time.Since(lastRateCalc).Seconds()
+					mc.mu.Lock()
 					mc.metrics.CurrentRate = rate
 					if rate > mc.metrics.PeakRate {
 						mc.metrics.PeakRate = rate
 					}
+					mc.mu.Unlock()
 					count = 0
 					lastRateCalc = time.Now()
 				}
@@ -350,12 +353,27 @@ func (mc *MetricsCollectorProcessor) Process(ctx context.Context, in <-chan LogE
 
 // GetMetrics returns current metrics.
 func (mc *MetricsCollectorProcessor) GetMetrics() Metrics {
-	m := *mc.metrics
+	mc.mu.RLock()
+	m := Metrics{
+		StartTime:       mc.metrics.StartTime,
+		CurrentRate:     mc.metrics.CurrentRate,
+		PeakRate:        mc.metrics.PeakRate,
+		AverageLatency:  mc.metrics.AverageLatency,
+		LastError:       mc.metrics.LastError,
+		LastErrorTime:   mc.metrics.LastErrorTime,
+	}
+	mc.mu.RUnlock()
+	
+	// Use atomic loads for all counter fields
 	m.LogsProcessed = atomic.LoadInt64(&mc.metrics.LogsProcessed)
 	m.LogsStored = atomic.LoadInt64(&mc.metrics.LogsStored)
 	m.LogsDropped = atomic.LoadInt64(&mc.metrics.LogsDropped)
 	m.AlertsSent = atomic.LoadInt64(&mc.metrics.AlertsSent)
 	m.SecurityThreats = atomic.LoadInt64(&mc.metrics.SecurityThreats)
+	m.BatchesCreated = atomic.LoadInt64(&mc.metrics.BatchesCreated)
+	m.DatabaseWrites = atomic.LoadInt64(&mc.metrics.DatabaseWrites)
+	m.ProcessingErrors = atomic.LoadInt64(&mc.metrics.ProcessingErrors)
+	
 	return m
 }
 
