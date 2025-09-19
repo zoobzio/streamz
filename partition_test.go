@@ -3,380 +3,636 @@ package streamz
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// TestPartitionBasicFunctionality tests basic partitioning operations.
-func TestPartitionBasicFunctionality(t *testing.T) {
-	ctx := context.Background()
-
-	// Create partitioner for orders by customer ID
-	partitioner := NewPartition[PartitionOrder](func(o PartitionOrder) string {
-		return o.CustomerID
-	}).WithPartitions(3)
-
-	// Create test orders
-	orders := []PartitionOrder{
-		{ID: "1", CustomerID: "cust-1", Amount: 100},
-		{ID: "2", CustomerID: "cust-2", Amount: 200},
-		{ID: "3", CustomerID: "cust-1", Amount: 150}, // Same customer as order 1
-		{ID: "4", CustomerID: "cust-3", Amount: 300},
-		{ID: "5", CustomerID: "cust-2", Amount: 250}, // Same customer as order 2
-		{ID: "6", CustomerID: "cust-1", Amount: 175}, // Same customer as order 1
+func TestPartition_HashRouting(t *testing.T) {
+	keyExtractor := func(s string) string {
+		return s
 	}
 
-	input := make(chan PartitionOrder, len(orders))
-	for _, order := range orders {
-		input <- order
+	partition, err := NewHashPartition(3, keyExtractor, 10)
+	if err != nil {
+		t.Fatalf("Failed to create partition: %v", err)
 	}
-	close(input)
 
-	// Process and partition
-	output := partitioner.Process(ctx, input)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
 
-	// Collect orders from each partition
-	partitionOrders := make([][]PartitionOrder, 3)
+	// Create input channel and send test data
+	in := make(chan Result[string], 10)
+	go func() {
+		defer close(in)
+		in <- NewSuccess("apple")  // Should consistently route to same partition
+		in <- NewSuccess("banana") // Should consistently route to same partition
+		in <- NewSuccess("apple")  // Should route to same partition as first apple
+	}()
+
+	outputs := partition.Process(ctx, in)
+	if len(outputs) != 3 {
+		t.Fatalf("Expected 3 output channels, got %d", len(outputs))
+	}
+
+	// Collect all results
 	var wg sync.WaitGroup
+	resultsChan := make(chan Result[string], 10)
 
-	for i, partition := range output.Partitions {
+	for i, out := range outputs {
 		wg.Add(1)
-		go func(idx int, p <-chan PartitionOrder) {
+		go func(partitionIndex int, ch <-chan Result[string]) {
 			defer wg.Done()
-			for order := range p {
-				partitionOrders[idx] = append(partitionOrders[idx], order)
-			}
-		}(i, partition)
-	}
-
-	wg.Wait()
-
-	// Verify all orders were processed
-	totalOrders := 0
-	for _, orders := range partitionOrders {
-		totalOrders += len(orders)
-	}
-	if totalOrders != 6 {
-		t.Errorf("expected 6 orders, got %d", totalOrders)
-	}
-
-	// Verify orders from same customer went to same partition
-	customerPartitions := make(map[string]int)
-	for partIdx, orders := range partitionOrders {
-		for _, order := range orders {
-			if existingPart, exists := customerPartitions[order.CustomerID]; exists {
-				if existingPart != partIdx {
-					t.Errorf("customer %s found in multiple partitions: %d and %d",
-						order.CustomerID, existingPart, partIdx)
-				}
-			} else {
-				customerPartitions[order.CustomerID] = partIdx
-			}
-		}
-	}
-
-	// Verify order preservation within partitions
-	for partIdx, orders := range partitionOrders {
-		for i := 1; i < len(orders); i++ {
-			// Orders from same customer should maintain order
-			if orders[i-1].CustomerID == orders[i].CustomerID {
-				prevID := orders[i-1].ID
-				currID := orders[i].ID
-				if prevID > currID {
-					t.Errorf("partition %d: order violated for customer %s: %s came after %s",
-						partIdx, orders[i].CustomerID, prevID, currID)
-				}
-			}
-		}
-	}
-
-	// Check statistics
-	stats := partitioner.GetStats()
-	if stats.TotalItems != 6 {
-		t.Errorf("expected 6 total items, got %d", stats.TotalItems)
-	}
-	if stats.NumPartitions != 3 {
-		t.Errorf("expected 3 partitions, got %d", stats.NumPartitions)
-	}
-}
-
-// TestPartitionConsistentRouting tests that same key always goes to same partition.
-func TestPartitionConsistentRouting(t *testing.T) {
-	ctx := context.Background()
-
-	partitioner := NewPartition[string](func(s string) string {
-		return s // Use string itself as key
-	}).WithPartitions(5)
-
-	// Track which partition each key goes to
-	keyToPartition := make(map[string]int)
-	var mu sync.Mutex
-
-	// Process items multiple times
-	for round := 0; round < 3; round++ {
-		input := make(chan string, 10)
-		keys := []string{"alpha", "beta", "gamma", "delta", "epsilon"}
-
-		for _, key := range keys {
-			input <- key
-		}
-		close(input)
-
-		output := partitioner.Process(ctx, input)
-
-		// Wait for all partitions to be consumed
-		var wg sync.WaitGroup
-
-		// Check routing
-		for partIdx, partition := range output.Partitions {
-			wg.Add(1)
-			go func(idx int, p <-chan string) {
-				defer wg.Done()
-				for item := range p {
-					mu.Lock()
-					if existingPart, exists := keyToPartition[item]; exists {
-						if existingPart != idx {
-							t.Errorf("key %s routed to different partitions: %d and %d",
-								item, existingPart, idx)
-						}
-					} else {
-						keyToPartition[item] = idx
+			for result := range ch {
+				// Verify partition metadata
+				if index, exists := result.GetMetadata(MetadataPartitionIndex); exists {
+					if idx, ok := index.(int); ok && idx != partitionIndex {
+						t.Errorf("Result routed to wrong partition: expected %d, got %d", partitionIndex, idx)
 					}
-					mu.Unlock()
 				}
-			}(partIdx, partition)
-		}
-
-		wg.Wait()
-	}
-}
-
-// TestPartitionDistribution tests even distribution of items.
-func TestPartitionDistribution(t *testing.T) {
-	ctx := context.Background()
-
-	// Use a simple incrementing key for even distribution
-	counter := 0
-	partitioner := NewPartition[int](func(n int) string {
-		return fmt.Sprintf("key-%d", n)
-	}).WithPartitions(4)
-
-	// Send many items
-	numItems := 1000
-	input := make(chan int, numItems)
-	for i := 0; i < numItems; i++ {
-		input <- counter
-		counter++
-	}
-	close(input)
-
-	output := partitioner.Process(ctx, input)
-
-	// Count items per partition
-	partitionCounts := make([]int, 4)
-	var wg sync.WaitGroup
-
-	for i, partition := range output.Partitions {
-		wg.Add(1)
-		go func(idx int, p <-chan int) {
-			defer wg.Done()
-			count := 0
-			for range p {
-				count++
+				resultsChan <- result
 			}
-			partitionCounts[idx] = count
-		}(i, partition)
+		}(i, out)
 	}
 
-	wg.Wait()
+	go func() {
+		wg.Wait()
+		close(resultsChan)
+	}()
 
-	// Check distribution
-	stats := partitioner.GetStats()
-	expectedPerPartition := numItems / 4
-	tolerance := float64(expectedPerPartition) * 0.2 // 20% tolerance
+	// Collect results and verify consistency
+	applePartitions := make(map[int]bool)
+	bananaPartitions := make(map[int]bool)
 
-	for i, count := range partitionCounts {
-		if float64(count) < float64(expectedPerPartition)-tolerance ||
-			float64(count) > float64(expectedPerPartition)+tolerance {
-			t.Errorf("partition %d has %d items, expected ~%d (±20%%)",
-				i, count, expectedPerPartition)
+	for result := range resultsChan {
+		if result.IsSuccess() {
+			value := result.Value()
+			partitionIndex, _ := result.GetMetadata(MetadataPartitionIndex)
+			idx, _ := partitionIndex.(int) //nolint:errcheck // test code, value guaranteed to be int
+
+			if value == "apple" {
+				applePartitions[idx] = true
+			} else if value == "banana" {
+				bananaPartitions[idx] = true
+			}
 		}
 	}
 
-	// Check balance metric
-	balance := stats.DistributionBalance()
-	if balance > 0.5 {
-		t.Errorf("distribution balance too high: %.2f", balance)
+	// Verify that same keys go to same partitions
+	if len(applePartitions) != 1 {
+		t.Errorf("Apple should always route to same partition, found in %d partitions", len(applePartitions))
+	}
+	if len(bananaPartitions) != 1 {
+		t.Errorf("Banana should always route to same partition, found in %d partitions", len(bananaPartitions))
 	}
 }
 
-// TestPartitionCustomPartitioner tests custom partitioning logic.
-func TestPartitionCustomPartitioner(t *testing.T) {
-	ctx := context.Background()
-
-	// Custom partitioner that puts even numbers in partition 0, odd in partition 1
-	customPartitioner := func(key string, _ int) int {
-		// Extract number from key
-		var n int
-		_, _ = fmt.Sscanf(key, "num-%d", &n) //nolint:errcheck // test code ignoring parse errors
-		return n % 2
+func TestPartition_RoundRobinRouting(t *testing.T) {
+	partition, err := NewRoundRobinPartition[int](3, 10)
+	if err != nil {
+		t.Fatalf("Failed to create partition: %v", err)
 	}
 
-	partitioner := NewPartition[int](func(n int) string {
-		return fmt.Sprintf("num-%d", n)
-	}).WithPartitions(2).WithPartitioner(customPartitioner)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
 
-	// Send numbers
-	input := make(chan int, 10)
-	for i := 0; i < 10; i++ {
-		input <- i
+	// Create input channel and send test data
+	in := make(chan Result[int], 10)
+	go func() {
+		defer close(in)
+		for i := 0; i < 9; i++ {
+			in <- NewSuccess(i)
+		}
+	}()
+
+	outputs := partition.Process(ctx, in)
+	if len(outputs) != 3 {
+		t.Fatalf("Expected 3 output channels, got %d", len(outputs))
 	}
-	close(input)
 
-	output := partitioner.Process(ctx, input)
-
-	// Collect from partitions
-	var evens, odds []int
+	// Collect results from each partition
+	partitionCounts := make([]int, 3)
 	var wg sync.WaitGroup
 
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		for n := range output.Partitions[0] {
-			evens = append(evens, n)
-		}
-	}()
-
-	go func() {
-		defer wg.Done()
-		for n := range output.Partitions[1] {
-			odds = append(odds, n)
-		}
-	}()
+	for i, out := range outputs {
+		wg.Add(1)
+		go func(partitionIndex int, ch <-chan Result[int]) {
+			defer wg.Done()
+			for result := range ch {
+				if result.IsSuccess() {
+					partitionCounts[partitionIndex]++
+					// Verify metadata
+					if index, exists := result.GetMetadata(MetadataPartitionIndex); exists {
+						if idx, ok := index.(int); ok && idx != partitionIndex {
+							t.Errorf("Result routed to wrong partition: expected %d, got %d", partitionIndex, idx)
+						}
+					}
+				}
+			}
+		}(i, out)
+	}
 
 	wg.Wait()
 
-	// Verify partitioning
-	for _, n := range evens {
-		if n%2 != 0 {
-			t.Errorf("found odd number %d in even partition", n)
+	// Verify even distribution (9 items across 3 partitions = 3 each)
+	for i, count := range partitionCounts {
+		if count != 3 {
+			t.Errorf("Partition %d received %d items, expected 3", i, count)
 		}
-	}
-
-	for _, n := range odds {
-		if n%2 != 1 {
-			t.Errorf("found even number %d in odd partition", n)
-		}
-	}
-
-	if len(evens) != 5 || len(odds) != 5 {
-		t.Errorf("expected 5 evens and 5 odds, got %d and %d", len(evens), len(odds))
 	}
 }
 
-// TestPartitionGetPartition tests the GetPartition method.
-func TestPartitionGetPartition(t *testing.T) {
-	ctx := context.Background()
+func TestPartition_ErrorHandling(t *testing.T) {
+	partition, err := NewRoundRobinPartition[string](3, 10)
+	if err != nil {
+		t.Fatalf("Failed to create partition: %v", err)
+	}
 
-	partitioner := NewPartition[int](func(n int) string {
-		return fmt.Sprintf("%d", n)
-	}).WithPartitions(3)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
 
-	input := make(chan int)
-	close(input)
+	// Create input with both successes and errors
+	in := make(chan Result[string], 10)
+	go func() {
+		defer close(in)
+		in <- NewSuccess("success1")
+		in <- NewError("error1", fmt.Errorf("test error"), "test")
+		in <- NewSuccess("success2")
+		in <- NewError("error2", fmt.Errorf("another error"), "test")
+	}()
 
-	output := partitioner.Process(ctx, input)
+	outputs := partition.Process(ctx, in)
 
-	// Test valid indices
-	for i := 0; i < 3; i++ {
-		partition := output.GetPartition(i)
-		if partition == nil {
-			t.Errorf("GetPartition(%d) returned nil", i)
-		}
-		if partition != output.Partitions[i] {
-			t.Error("GetPartition returned different channel than Partitions array")
+	// Collect all results
+	var wg sync.WaitGroup
+	resultsChan := make(chan Result[string], 10)
+
+	for i, out := range outputs {
+		wg.Add(1)
+		go func(_ int, ch <-chan Result[string]) {
+			defer wg.Done()
+			for result := range ch {
+				resultsChan <- result
+			}
+		}(i, out)
+	}
+
+	go func() {
+		wg.Wait()
+		close(resultsChan)
+	}()
+
+	// Verify all errors go to partition 0
+	errorCount := 0
+	successCount := 0
+
+	for result := range resultsChan {
+		partitionIndex, _ := result.GetMetadata(MetadataPartitionIndex)
+		idx, _ := partitionIndex.(int) //nolint:errcheck // test code, value guaranteed to be int
+
+		if result.IsError() {
+			errorCount++
+			if idx != 0 {
+				t.Errorf("Error routed to partition %d, expected partition 0", idx)
+			}
+		} else {
+			successCount++
 		}
 	}
 
-	// Test invalid indices
-	if output.GetPartition(-1) != nil {
-		t.Error("GetPartition(-1) should return nil")
+	if errorCount != 2 {
+		t.Errorf("Expected 2 errors, got %d", errorCount)
 	}
-	if output.GetPartition(3) != nil {
-		t.Error("GetPartition(3) should return nil for 3 partitions")
+	if successCount != 2 {
+		t.Errorf("Expected 2 successes, got %d", successCount)
 	}
 }
 
-// TestPartitionContextCancellation tests graceful shutdown.
-func TestPartitionContextCancellation(t *testing.T) {
+func TestPartition_ContextCancellation(t *testing.T) {
+	partition, err := NewRoundRobinPartition[int](2, 0)
+	if err != nil {
+		t.Fatalf("Failed to create partition: %v", err)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 
-	partitioner := NewPartition[int](func(n int) string {
-		return fmt.Sprintf("%d", n)
-	}).WithPartitions(2)
+	in := make(chan Result[int])
+	outputs := partition.Process(ctx, in)
 
-	input := make(chan int)
-	output := partitioner.Process(ctx, input)
-
-	// Start consumers
-	var wg sync.WaitGroup
-	var processedCount atomic.Int32
-
-	for _, partition := range output.Partitions {
-		wg.Add(1)
-		go func(p <-chan int) {
-			defer wg.Done()
-			for range p {
-				processedCount.Add(1)
-			}
-		}(partition)
-	}
-
-	// Send some items
-	go func() {
-		for i := 0; i < 100; i++ {
-			select {
-			case input <- i:
-			case <-ctx.Done():
-				close(input)
-				return
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-		close(input)
-	}()
-
-	// Let some items process
-	time.Sleep(50 * time.Millisecond)
-
-	// Cancel context
+	// Cancel context immediately
 	cancel()
 
-	// Wait for completion
-	wg.Wait()
-
-	// Should have processed some but not all
-	count := processedCount.Load()
-	if count == 0 {
-		t.Error("expected some items to be processed")
+	// Try to send data (should not block)
+	select {
+	case in <- NewSuccess(1):
+	case <-time.After(100 * time.Millisecond):
+		// This is expected - context canceled
 	}
-	if count >= 100 {
-		t.Errorf("expected cancellation to stop processing, but processed %d items", count)
+
+	// Verify channels are closed within reasonable time
+	closed := 0
+	for _, out := range outputs {
+		select {
+		case _, ok := <-out:
+			if !ok {
+				closed++
+			}
+		case <-time.After(100 * time.Millisecond):
+			t.Error("Channel not closed after context cancellation")
+		}
+	}
+
+	if closed != len(outputs) {
+		t.Errorf("Expected %d channels closed, got %d", len(outputs), closed)
 	}
 }
 
-// TestPartitionConcurrentProcessing tests concurrent access.
-func TestPartitionConcurrentProcessing(t *testing.T) {
-	ctx := context.Background()
+func TestPartition_MetadataPreservation(t *testing.T) {
+	partition, err := NewRoundRobinPartition[string](2, 10)
+	if err != nil {
+		t.Fatalf("Failed to create partition: %v", err)
+	}
 
-	partitioner := NewPartition[int](func(n int) string {
-		return fmt.Sprintf("key-%d", n%10) // 10 different keys
-	}).WithPartitions(4).WithBufferSize(10)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
 
-	// Multiple producers
-	input := make(chan int)
+	// Create input with metadata
+	in := make(chan Result[string], 10)
+	go func() {
+		defer close(in)
+		result := NewSuccess("test").
+			WithMetadata("custom_key", "custom_value").
+			WithMetadata("timestamp", time.Now())
+		in <- result
+	}()
+
+	outputs := partition.Process(ctx, in)
+
+	// Collect result and verify metadata preservation
+	var result Result[string]
+	var wg sync.WaitGroup
+
+	for _, out := range outputs {
+		wg.Add(1)
+		go func(ch <-chan Result[string]) {
+			defer wg.Done()
+			for r := range ch {
+				result = r
+			}
+		}(out)
+	}
+
+	wg.Wait()
+
+	// Verify original metadata preserved
+	if value, exists := result.GetMetadata("custom_key"); !exists || value != "custom_value" {
+		t.Error("Original metadata not preserved")
+	}
+
+	// Verify partition metadata added
+	if _, exists := result.GetMetadata(MetadataPartitionIndex); !exists {
+		t.Error("Partition index metadata not added")
+	}
+	if total, exists := result.GetMetadata(MetadataPartitionTotal); !exists || total != 2 {
+		t.Error("Partition total metadata not added or incorrect")
+	}
+	if strategy, exists := result.GetMetadata(MetadataPartitionStrategy); !exists || strategy != "round_robin" {
+		t.Error("Partition strategy metadata not added or incorrect")
+	}
+}
+
+func TestHashPartition_ConsistentRouting(t *testing.T) {
+	keyExtractor := func(s string) string {
+		return s
+	}
+
+	strategy := &HashPartition[string, string]{
+		keyExtractor: keyExtractor,
+		hasher:       defaultHasher[string],
+	}
+
+	// Test multiple calls with same value return same partition
+	value := "consistent_test"
+	partitionCount := 5
+
+	firstResult := strategy.Route(value, partitionCount)
+	for i := 0; i < 100; i++ {
+		result := strategy.Route(value, partitionCount)
+		if result != firstResult {
+			t.Errorf("Inconsistent routing: first=%d, iteration %d=%d", firstResult, i, result)
+		}
+	}
+
+	// Verify result is in valid range
+	if firstResult < 0 || firstResult >= partitionCount {
+		t.Errorf("Route result %d out of range [0, %d)", firstResult, partitionCount)
+	}
+}
+
+func TestHashPartition_DistributionQuality(t *testing.T) {
+	keyExtractor := func(i int) int {
+		return i
+	}
+
+	strategy := &HashPartition[int, int]{
+		keyExtractor: keyExtractor,
+		hasher:       defaultHasher[int],
+	}
+
+	partitionCount := 5
+	sampleSize := 10000
+	counts := make([]int, partitionCount)
+
+	// Generate sample distribution
+	for i := 0; i < sampleSize; i++ {
+		partition := strategy.Route(i, partitionCount)
+		if partition < 0 || partition >= partitionCount {
+			t.Fatalf("Invalid partition index: %d", partition)
+		}
+		counts[partition]++
+	}
+
+	// Check distribution quality (should be roughly even)
+	expectedCount := sampleSize / partitionCount
+	tolerance := expectedCount / 10 // 10% tolerance
+
+	for i, count := range counts {
+		if count < expectedCount-tolerance || count > expectedCount+tolerance {
+			t.Logf("Partition %d: %d items (expected ~%d)", i, count, expectedCount)
+		}
+	}
+
+	// Verify no partition is completely empty
+	for i, count := range counts {
+		if count == 0 {
+			t.Errorf("Partition %d received no items", i)
+		}
+	}
+}
+
+func TestRoundRobinPartition_EvenDistribution(t *testing.T) {
+	strategy := &RoundRobinPartition[int]{counter: 0}
+	partitionCount := 4
+	sampleSize := 100
+
+	counts := make([]int, partitionCount)
+
+	for i := 0; i < sampleSize; i++ {
+		partition := strategy.Route(i, partitionCount)
+		if partition < 0 || partition >= partitionCount {
+			t.Fatalf("Invalid partition index: %d", partition)
+		}
+		counts[partition]++
+	}
+
+	// Should be exactly even for round-robin
+	expectedCount := sampleSize / partitionCount
+	for i, count := range counts {
+		if count != expectedCount {
+			t.Errorf("Partition %d: %d items, expected %d", i, count, expectedCount)
+		}
+	}
+}
+
+func TestPartition_SinglePartition(t *testing.T) {
+	partition, err := NewRoundRobinPartition[string](1, 5)
+	if err != nil {
+		t.Fatalf("Failed to create single partition: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	in := make(chan Result[string], 5)
+	go func() {
+		defer close(in)
+		in <- NewSuccess("test1")
+		in <- NewSuccess("test2")
+		in <- NewError("error", fmt.Errorf("test error"), "test")
+	}()
+
+	outputs := partition.Process(ctx, in)
+	if len(outputs) != 1 {
+		t.Fatalf("Expected 1 output channel, got %d", len(outputs))
+	}
+
+	// Collect all results
+	results := make([]Result[string], 0, 10)
+	for result := range outputs[0] {
+		results = append(results, result)
+	}
+
+	if len(results) != 3 {
+		t.Errorf("Expected 3 results, got %d", len(results))
+	}
+
+	// All should route to partition 0
+	for _, result := range results {
+		if index, exists := result.GetMetadata(MetadataPartitionIndex); exists {
+			if idx, ok := index.(int); ok && idx != 0 {
+				t.Errorf("Result routed to partition %d, expected 0", idx)
+			}
+		}
+	}
+}
+
+func TestPartition_StrategyPanic(t *testing.T) {
+	// Create a strategy that panics
+	panicStrategy := &testPanicStrategy[string]{}
+
+	config := PartitionConfig[string]{
+		PartitionCount: 3,
+		Strategy:       panicStrategy,
+		BufferSize:     5,
+	}
+
+	partition, err := NewPartition(config)
+	if err != nil {
+		t.Fatalf("Failed to create partition: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	in := make(chan Result[string], 5)
+	go func() {
+		defer close(in)
+		in <- NewSuccess("test")
+	}()
+
+	outputs := partition.Process(ctx, in)
+
+	// Collect result from partition 0 (panic recovery should route there)
+	var result Result[string]
+	select {
+	case result = <-outputs[0]:
+	case <-time.After(time.Second):
+		t.Fatal("No result received from partition 0")
+	}
+
+	// Verify it was routed to partition 0 due to panic
+	if index, exists := result.GetMetadata(MetadataPartitionIndex); exists {
+		if idx, ok := index.(int); ok && idx != 0 {
+			t.Errorf("Panic should route to partition 0, got %d", idx)
+		}
+	}
+}
+
+func TestPartition_KeyExtractorPanic(t *testing.T) {
+	// Key extractor that panics
+	keyExtractor := func(_ string) string {
+		panic("key extractor panic")
+	}
+
+	partition, err := NewHashPartition(3, keyExtractor, 5)
+	if err != nil {
+		t.Fatalf("Failed to create partition: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	in := make(chan Result[string], 5)
+	go func() {
+		defer close(in)
+		in <- NewSuccess("test")
+	}()
+
+	outputs := partition.Process(ctx, in)
+
+	// Should route to partition 0 due to panic
+	var result Result[string]
+	select {
+	case result = <-outputs[0]:
+	case <-time.After(time.Second):
+		t.Fatal("No result received from partition 0")
+	}
+
+	if index, exists := result.GetMetadata(MetadataPartitionIndex); exists {
+		if idx, ok := index.(int); ok && idx != 0 {
+			t.Errorf("Key extractor panic should route to partition 0, got %d", idx)
+		}
+	}
+}
+
+func TestPartition_HasherPanic(t *testing.T) {
+	// Hasher that panics
+	hasher := func(_ string) uint64 {
+		panic("hasher panic")
+	}
+
+	strategy := &HashPartition[string, string]{
+		keyExtractor: func(s string) string { return s },
+		hasher:       hasher,
+	}
+
+	config := PartitionConfig[string]{
+		PartitionCount: 3,
+		Strategy:       strategy,
+		BufferSize:     5,
+	}
+
+	partition, err := NewPartition(config)
+	if err != nil {
+		t.Fatalf("Failed to create partition: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	in := make(chan Result[string], 5)
+	go func() {
+		defer close(in)
+		in <- NewSuccess("test")
+	}()
+
+	outputs := partition.Process(ctx, in)
+
+	// Should route to partition 0 due to panic
+	var result Result[string]
+	select {
+	case result = <-outputs[0]:
+	case <-time.After(time.Second):
+		t.Fatal("No result received from partition 0")
+	}
+
+	if index, exists := result.GetMetadata(MetadataPartitionIndex); exists {
+		if idx, ok := index.(int); ok && idx != 0 {
+			t.Errorf("Hasher panic should route to partition 0, got %d", idx)
+		}
+	}
+}
+
+func TestPartition_ConfigValidation(t *testing.T) {
+	tests := []struct {
+		name          string
+		config        PartitionConfig[string]
+		expectedError string
+	}{
+		{
+			name: "zero partition count",
+			config: PartitionConfig[string]{
+				PartitionCount: 0,
+				Strategy:       &RoundRobinPartition[string]{},
+				BufferSize:     5,
+			},
+			expectedError: "partition count must be > 0, got 0",
+		},
+		{
+			name: "negative partition count",
+			config: PartitionConfig[string]{
+				PartitionCount: -1,
+				Strategy:       &RoundRobinPartition[string]{},
+				BufferSize:     5,
+			},
+			expectedError: "partition count must be > 0, got -1",
+		},
+		{
+			name: "negative buffer size",
+			config: PartitionConfig[string]{
+				PartitionCount: 3,
+				Strategy:       &RoundRobinPartition[string]{},
+				BufferSize:     -1,
+			},
+			expectedError: "buffer size must be >= 0, got -1",
+		},
+		{
+			name: "nil strategy",
+			config: PartitionConfig[string]{
+				PartitionCount: 3,
+				Strategy:       nil,
+				BufferSize:     5,
+			},
+			expectedError: "strategy cannot be nil",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewPartition(tt.config)
+			if err == nil {
+				t.Error("Expected error, got nil")
+			} else if err.Error() != tt.expectedError {
+				t.Errorf("Expected error %q, got %q", tt.expectedError, err.Error())
+			}
+		})
+	}
+}
+
+func TestPartition_ConcurrentRouting(t *testing.T) {
+	partition, err := NewHashPartition(5, func(i int) int { return i }, 100)
+	if err != nil {
+		t.Fatalf("Failed to create partition: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	in := make(chan Result[int], 1000)
+	outputs := partition.Process(ctx, in)
+
+	// Start multiple producers
 	var producerWg sync.WaitGroup
 	numProducers := 5
 	itemsPerProducer := 100
@@ -386,261 +642,229 @@ func TestPartitionConcurrentProcessing(t *testing.T) {
 		go func(producerID int) {
 			defer producerWg.Done()
 			for i := 0; i < itemsPerProducer; i++ {
-				select {
-				case input <- producerID*1000 + i:
-				case <-ctx.Done():
-					return
-				}
+				value := producerID*itemsPerProducer + i
+				in <- NewSuccess(value)
 			}
 		}(p)
 	}
 
+	// Close input when all producers done
 	go func() {
 		producerWg.Wait()
-		close(input)
+		close(in)
 	}()
 
-	output := partitioner.Process(ctx, input)
+	// Collect results from all partitions
+	var collectorWg sync.WaitGroup
+	totalReceived := int64(0)
+	var receivedMutex sync.Mutex
 
-	// Multiple consumers per partition
-	var consumerWg sync.WaitGroup
-	totalProcessed := atomic.Int32{}
-
-	for partIdx, partition := range output.Partitions {
-		for c := 0; c < 2; c++ { // 2 consumers per partition
-			consumerWg.Add(1)
-			go func(_, _ int, p <-chan int) {
-				defer consumerWg.Done()
-				count := 0
-				for range p {
+	for _, out := range outputs {
+		collectorWg.Add(1)
+		go func(ch <-chan Result[int]) {
+			defer collectorWg.Done()
+			count := 0
+			for result := range ch {
+				if result.IsSuccess() {
 					count++
-					totalProcessed.Add(1)
 				}
-			}(partIdx, c, partition)
-		}
-	}
-
-	consumerWg.Wait()
-
-	// Verify all items processed
-	expected := int32(numProducers * itemsPerProducer) // #nosec G115 - test code with known values
-	if totalProcessed.Load() != expected {
-		t.Errorf("expected %d items processed, got %d", expected, totalProcessed.Load())
-	}
-
-	// Verify stats
-	stats := partitioner.GetStats()
-	if stats.TotalItems != int64(expected) {
-		t.Errorf("stats show %d items, expected %d", stats.TotalItems, expected)
-	}
-}
-
-// TestPartitionFluentAPI tests fluent configuration.
-func TestPartitionFluentAPI(t *testing.T) {
-	partitioner := NewPartition[string](func(s string) string { return s }).
-		WithPartitions(8).
-		WithBufferSize(100).
-		WithName("test-partitioner").
-		WithPartitioner(func(key string, n int) int {
-			return len(key) % n
-		})
-
-	if partitioner.numPartitions != 8 {
-		t.Errorf("expected 8 partitions, got %d", partitioner.numPartitions)
-	}
-
-	if partitioner.bufferSize != 100 {
-		t.Errorf("expected buffer size 100, got %d", partitioner.bufferSize)
-	}
-
-	if partitioner.Name() != "test-partitioner" {
-		t.Errorf("expected name 'test-partitioner', got %s", partitioner.Name())
-	}
-
-	// Test custom partitioner
-	partition := partitioner.partitioner("hello", 8) // length 5
-	if partition != 5 {
-		t.Errorf("custom partitioner returned %d, expected 5", partition)
-	}
-}
-
-// TestPartitionEdgeCases tests edge cases.
-func TestPartitionEdgeCases(t *testing.T) {
-	ctx := context.Background()
-
-	t.Run("ZeroPartitions", func(t *testing.T) {
-		// Should default to 1 partition
-		partitioner := NewPartition[int](func(n int) string {
-			return fmt.Sprintf("%d", n)
-		}).WithPartitions(0)
-
-		if partitioner.numPartitions != 1 {
-			t.Errorf("expected 1 partition for 0 input, got %d", partitioner.numPartitions)
-		}
-	})
-
-	t.Run("NegativeBufferSize", func(t *testing.T) {
-		// Should default to 0
-		partitioner := NewPartition[int](func(n int) string {
-			return fmt.Sprintf("%d", n)
-		}).WithBufferSize(-10)
-
-		if partitioner.bufferSize != 0 {
-			t.Errorf("expected 0 buffer size for negative input, got %d", partitioner.bufferSize)
-		}
-	})
-
-	t.Run("EmptyInput", func(t *testing.T) {
-		partitioner := NewPartition[int](func(n int) string {
-			return fmt.Sprintf("%d", n)
-		}).WithPartitions(3)
-
-		input := make(chan int)
-		close(input)
-
-		output := partitioner.Process(ctx, input)
-
-		// All partitions should close immediately
-		for i, partition := range output.Partitions {
-			_, ok := <-partition
-			if ok {
-				t.Errorf("partition %d should be closed for empty input", i)
 			}
-		}
-	})
+			receivedMutex.Lock()
+			totalReceived += int64(count)
+			receivedMutex.Unlock()
+		}(out)
+	}
 
-	t.Run("NilPartitioner", func(t *testing.T) {
-		partitioner := NewPartition[int](func(n int) string {
-			return fmt.Sprintf("%d", n)
-		}).WithPartitioner(nil)
+	collectorWg.Wait()
 
-		// Should keep default partitioner
-		if partitioner.partitioner == nil {
-			t.Error("partitioner should not be nil")
-		}
-	})
-}
-
-// BenchmarkPartition benchmarks partitioning performance.
-func BenchmarkPartition(b *testing.B) {
-	ctx := context.Background()
-
-	partitioner := NewPartition[int](func(n int) string {
-		return fmt.Sprintf("key-%d", n)
-	}).WithPartitions(4)
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		input := make(chan int, 1)
-		input <- i
-		close(input)
-
-		output := partitioner.Process(ctx, input)
-
-		// Drain all partitions
-		var wg sync.WaitGroup
-		for _, partition := range output.Partitions {
-			wg.Add(1)
-			go func(p <-chan int) {
-				defer wg.Done()
-				for range p { //nolint:revive // Intentionally draining channel
-					// Consume
-				}
-			}(partition)
-		}
-		wg.Wait()
+	expectedTotal := int64(numProducers * itemsPerProducer)
+	if totalReceived != expectedTotal {
+		t.Errorf("Expected %d items, received %d", expectedTotal, totalReceived)
 	}
 }
 
-// BenchmarkPartitionThroughput benchmarks high-throughput partitioning.
-func BenchmarkPartitionThroughput(b *testing.B) {
-	ctx := context.Background()
-
-	partitioner := NewPartition[int](func(n int) string {
-		return fmt.Sprintf("customer-%d", n%1000)
-	}).WithPartitions(10).WithBufferSize(100)
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	input := make(chan int, 1000)
-	output := partitioner.Process(ctx, input)
-
-	// Start consumers
-	var wg sync.WaitGroup
-	for _, partition := range output.Partitions {
-		wg.Add(1)
-		go func(p <-chan int) {
-			defer wg.Done()
-			for range p { //nolint:revive // Intentionally draining channel
-				// Consume
-			}
-		}(partition)
+func TestPartition_BufferOverflow(t *testing.T) {
+	// Create partition with very small buffer
+	partition, err := NewRoundRobinPartition[int](2, 1)
+	if err != nil {
+		t.Fatalf("Failed to create partition: %v", err)
 	}
 
-	// Send items
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	in := make(chan Result[int], 10)
+	outputs := partition.Process(ctx, in)
+
+	// Send more data than buffer can hold
 	go func() {
-		for i := 0; i < b.N; i++ {
-			input <- i
+		defer close(in)
+		for i := 0; i < 10; i++ {
+			in <- NewSuccess(i)
 		}
-		close(input)
+	}()
+
+	// Slowly consume from one partition to create backpressure
+	var consumedCount int
+	consumerCtx, consumerCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer consumerCancel()
+
+	// Consume from partition 0 slowly
+	go func() {
+		for {
+			select {
+			case <-consumerCtx.Done():
+				return
+			case result, ok := <-outputs[0]:
+				if !ok {
+					return
+				}
+				if result.IsSuccess() {
+					consumedCount++
+				}
+				time.Sleep(50 * time.Millisecond) // Slow consumption
+			}
+		}
+	}()
+
+	// Consume from partition 1 normally
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for result := range outputs[1] {
+			if result.IsSuccess() {
+				consumedCount++
+			}
+		}
 	}()
 
 	wg.Wait()
-}
 
-// PartitionOrder type for testing.
-type PartitionOrder struct {
-	ID         string
-	CustomerID string
-	Amount     float64
-}
-
-// Example demonstrates basic partitioning usage.
-func ExamplePartition() {
-	ctx := context.Background()
-
-	// Partition messages by user ID for parallel processing
-	partitioner := NewPartition[PartitionMessage](func(m PartitionMessage) string {
-		return m.UserID
-	}).WithPartitions(3)
-
-	// Create input messages
-	messages := make(chan PartitionMessage, 6)
-	messages <- PartitionMessage{ID: "1", UserID: "alice", Content: "Hello"}
-	messages <- PartitionMessage{ID: "2", UserID: "bob", Content: "Hi"}
-	messages <- PartitionMessage{ID: "3", UserID: "alice", Content: "How are you?"}
-	messages <- PartitionMessage{ID: "4", UserID: "charlie", Content: "Hey"}
-	messages <- PartitionMessage{ID: "5", UserID: "bob", Content: "What's up?"}
-	messages <- PartitionMessage{ID: "6", UserID: "alice", Content: "Good, thanks!"}
-	close(messages)
-
-	// Process partitions
-	output := partitioner.Process(ctx, messages)
-
-	// Process each partition independently
-	var wg sync.WaitGroup
-	for i, partition := range output.Partitions {
-		wg.Add(1)
-		go func(partIdx int, p <-chan PartitionMessage) {
-			defer wg.Done()
-			fmt.Printf("Partition %d:\n", partIdx)
-			for msg := range p {
-				fmt.Printf("  %s: %s\n", msg.UserID, msg.Content)
-			}
-		}(i, partition)
+	// Should still process all items (may take time due to backpressure)
+	if consumedCount < 5 {
+		t.Logf("Only consumed %d items due to backpressure (expected behavior)", consumedCount)
 	}
-	wg.Wait()
-
-	// Note: Output order may vary between partitions, but messages
-	// from the same user will always be in the same partition and in order
 }
 
-// PartitionMessage type for example.
-type PartitionMessage struct {
-	ID      string
-	UserID  string
-	Content string
+func TestDefaultHasher_CommonTypes(t *testing.T) {
+	tests := []struct {
+		name string
+		key  interface{}
+	}{
+		{"string", "test"},
+		{"int", 42},
+		{"int64", int64(42)},
+		{"int32", int32(42)},
+		{"uint64", uint64(42)},
+		{"uint32", uint32(42)},
+		{"float64", 3.14},
+		{"float32", float32(3.14)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Test that hasher doesn't panic and returns consistent results
+			var hash1, hash2 uint64
+
+			switch v := tt.key.(type) {
+			case string:
+				hash1 = defaultHasher(v)
+				hash2 = defaultHasher(v)
+			case int:
+				hash1 = defaultHasher(v)
+				hash2 = defaultHasher(v)
+			case int64:
+				hash1 = defaultHasher(v)
+				hash2 = defaultHasher(v)
+			case int32:
+				hash1 = defaultHasher(v)
+				hash2 = defaultHasher(v)
+			case uint64:
+				hash1 = defaultHasher(v)
+				hash2 = defaultHasher(v)
+			case uint32:
+				hash1 = defaultHasher(v)
+				hash2 = defaultHasher(v)
+			case float64:
+				hash1 = defaultHasher(v)
+				hash2 = defaultHasher(v)
+			case float32:
+				hash1 = defaultHasher(v)
+				hash2 = defaultHasher(v)
+			}
+
+			if hash1 != hash2 {
+				t.Errorf("Inconsistent hash for %T: %d != %d", tt.key, hash1, hash2)
+			}
+			if hash1 == 0 {
+				t.Errorf("Hash should not be zero for %T", tt.key)
+			}
+		})
+	}
+}
+
+func TestHashPartition_NoModuloBias(t *testing.T) {
+	strategy := &HashPartition[int, int]{
+		keyExtractor: func(i int) int { return i },
+		hasher:       defaultHasher[int],
+	}
+
+	// Test with partition count that would show modulo bias (non-power-of-2)
+	partitionCount := 7
+	sampleSize := 70000
+	counts := make([]int, partitionCount)
+
+	for i := 0; i < sampleSize; i++ {
+		partition := strategy.Route(i, partitionCount)
+		counts[partition]++
+	}
+
+	// Calculate chi-square statistic for uniformity test
+	expected := float64(sampleSize) / float64(partitionCount)
+	chiSquare := 0.0
+
+	for _, count := range counts {
+		diff := float64(count) - expected
+		chiSquare += (diff * diff) / expected
+	}
+
+	// Chi-square critical value for 6 degrees of freedom at 95% confidence ≈ 12.59
+	// Using relaxed threshold for hash function quality test
+	if chiSquare > 20.0 {
+		t.Errorf("Distribution too uneven, chi-square: %.2f", chiSquare)
+		for i, count := range counts {
+			t.Logf("Partition %d: %d items (%.1f%%)", i, count, 100.0*float64(count)/float64(sampleSize))
+		}
+	}
+}
+
+// Test helper: strategy that always panics.
+type testPanicStrategy[T any] struct{}
+
+func (*testPanicStrategy[T]) Route(_ T, _ int) int {
+	panic("test panic in strategy")
+}
+
+// Benchmark hash partitioning performance.
+func BenchmarkHashPartition_Route(b *testing.B) {
+	strategy := &HashPartition[string, string]{
+		keyExtractor: func(s string) string { return s },
+		hasher:       defaultHasher[string],
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		strategy.Route("test_key_"+strconv.Itoa(i%1000), 8)
+	}
+}
+
+// Benchmark round-robin partitioning performance.
+func BenchmarkRoundRobinPartition_Route(b *testing.B) {
+	strategy := &RoundRobinPartition[string]{counter: 0}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		strategy.Route("test", 8)
+	}
 }

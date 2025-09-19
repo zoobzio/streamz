@@ -2,29 +2,28 @@
 // that work with Go channels, enabling real-time data processing through
 // batching, windowing, and other streaming operations.
 //
-// The core abstraction is the Processor interface which transforms input
-// channels to output channels. Processors can be composed to build complex
-// streaming pipelines while maintaining type safety throughout.
+// The core abstraction uses the Result[T] pattern which unifies success and
+// error cases into a single channel. This eliminates dual-channel complexity
+// while providing explicit error handling and better monitoring capabilities.
 //
 // Basic usage:
 //
 //	ctx := context.Background()
-//	source := make(chan int)
+//	source := make(chan Result[int])
 //
 //	// Create a simple processing pipeline
-//	filter := streamz.NewFilter("positive", func(n int) bool { return n > 0 })
-//	batcher := streamz.NewBatcher[int](streamz.BatchConfig{
-//		MaxSize:    10,
-//		MaxLatency: 100 * time.Millisecond,
-//	})
+//	fanin := streamz.NewFanIn[int]()
 //
-//	// Chain processors
-//	filtered := filter.Process(ctx, source)
-//	batched := batcher.Process(ctx, filtered)
+//	// Process returns a single Result[T] channel
+//	results := fanin.Process(ctx, source)
 //
-//	// Process results
-//	for batch := range batched {
-//		fmt.Printf("Got batch: %v\n", batch)
+//	// Handle both success and error cases from single channel
+//	for result := range results {
+//		if result.IsError() {
+//			log.Printf("Processing error: %v", result.Error())
+//		} else {
+//			fmt.Printf("Got item: %v\n", result.Value())
+//		}
 //	}
 //
 // The package provides various processors for common streaming patterns:
@@ -39,25 +38,8 @@
 package streamz
 
 import (
-	"context"
 	"time"
 )
-
-// Processor is the core interface for stream processing components.
-// It transforms an input channel of type In to an output channel of type Out.
-// Processors should:
-//   - Close the output channel when the input channel is closed
-//   - Respect context cancellation
-//   - Handle errors gracefully (typically by skipping problematic items)
-//   - Be safe for concurrent use
-type Processor[In, Out any] interface {
-	// Process transforms the input channel to an output channel.
-	// It should close the output channel when processing is complete.
-	Process(ctx context.Context, in <-chan In) <-chan Out
-
-	// Name returns a descriptive name for the processor, useful for debugging.
-	Name() string
-}
 
 // BatchConfig configures batching behavior for the Batcher processor.
 type BatchConfig struct {

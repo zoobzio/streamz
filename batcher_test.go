@@ -2,437 +2,684 @@ package streamz
 
 import (
 	"context"
-	"fmt"
-	"sync"
+	"errors"
 	"testing"
 	"time"
+
+	"github.com/zoobzio/clockz"
 )
 
-// TestBatcherBySize tests batching by size.
-func TestBatcherBySize(t *testing.T) {
+func TestBatcher_Name(t *testing.T) {
+	batcher := NewBatcher[string](BatchConfig{MaxSize: 10}, RealClock)
+	if batcher.Name() != "batcher" {
+		t.Errorf("expected name 'batcher', got %q", batcher.Name())
+	}
+}
+
+func TestBatcher_SingleItem_SizeOnly(t *testing.T) {
+	clock := clockz.NewFakeClock()
+	batcher := NewBatcher[int](BatchConfig{MaxSize: 1}, clock)
 	ctx := context.Background()
 
-	config := BatchConfig{
+	in := make(chan Result[int], 1)
+	in <- NewSuccess(42)
+	close(in)
+
+	out := batcher.Process(ctx, in)
+
+	// Should receive batch immediately when size limit reached
+	result := <-out
+	if result.IsError() {
+		t.Errorf("unexpected error: %v", result.Error())
+	}
+	batch := result.Value()
+	if len(batch) != 1 {
+		t.Errorf("expected batch size 1, got %d", len(batch))
+	}
+	if batch[0] != 42 {
+		t.Errorf("expected batch[0] = 42, got %d", batch[0])
+	}
+
+	// Channel should be closed
+	_, ok := <-out
+	if ok {
+		t.Error("expected channel to be closed")
+	}
+}
+
+func TestBatcher_SingleItem_FlushOnClose(t *testing.T) {
+	clock := clockz.NewFakeClock()
+	batcher := NewBatcher[int](BatchConfig{
+		MaxSize:    10,
+		MaxLatency: 100 * time.Millisecond,
+	}, clock)
+	ctx := context.Background()
+
+	in := make(chan Result[int], 1)
+	in <- NewSuccess(42)
+	close(in)
+
+	out := batcher.Process(ctx, in)
+
+	// Should receive batch immediately on channel close (flush pending)
+	result := <-out
+	if result.IsError() {
+		t.Errorf("unexpected error: %v", result.Error())
+	}
+	batch := result.Value()
+	if len(batch) != 1 {
+		t.Errorf("expected batch size 1, got %d", len(batch))
+	}
+	if batch[0] != 42 {
+		t.Errorf("expected batch[0] = 42, got %d", batch[0])
+	}
+
+	// Channel should be closed
+	_, ok := <-out
+	if ok {
+		t.Error("expected channel to be closed")
+	}
+}
+
+func TestBatcher_MultipleItems_SizeLimit(t *testing.T) {
+	clock := clockz.NewFakeClock()
+	batcher := NewBatcher[string](BatchConfig{
 		MaxSize:    3,
-		MaxLatency: 1 * time.Hour, // Effectively disabled.
+		MaxLatency: 100 * time.Millisecond,
+	}, clock)
+	ctx := context.Background()
+
+	in := make(chan Result[string], 5)
+	in <- NewSuccess("first")
+	in <- NewSuccess("second")
+	in <- NewSuccess("third")
+	in <- NewSuccess("fourth")
+	in <- NewSuccess("fifth")
+	close(in)
+
+	out := batcher.Process(ctx, in)
+
+	// Should receive first batch of 3 items
+	result1 := <-out
+	if result1.IsError() {
+		t.Errorf("unexpected error: %v", result1.Error())
 	}
-
-	batcher := NewBatcher[int](config, RealClock)
-
-	input := make(chan int, 10)
-	for i := 1; i <= 10; i++ {
-		input <- i
+	batch1 := result1.Value()
+	if len(batch1) != 3 {
+		t.Errorf("expected first batch size 3, got %d", len(batch1))
 	}
-	close(input)
-
-	output := batcher.Process(ctx, input)
-
-	expectedBatches := [][]int{
-		{1, 2, 3},
-		{4, 5, 6},
-		{7, 8, 9},
-		{10}, // Final partial batch.
-	}
-
-	batches := make([][]int, 0, len(expectedBatches))
-	for batch := range output {
-		batches = append(batches, batch)
-	}
-
-	if len(batches) != len(expectedBatches) {
-		t.Fatalf("expected %d batches, got %d", len(expectedBatches), len(batches))
-	}
-
-	for i, batch := range batches {
-		if len(batch) != len(expectedBatches[i]) {
-			t.Errorf("batch %d: expected size %d, got %d", i, len(expectedBatches[i]), len(batch))
-		}
-		for j, item := range batch {
-			if item != expectedBatches[i][j] {
-				t.Errorf("batch %d, item %d: expected %d, got %d", i, j, expectedBatches[i][j], item)
-			}
+	expected1 := []string{"first", "second", "third"}
+	for i, expected := range expected1 {
+		if batch1[i] != expected {
+			t.Errorf("expected batch1[%d] = %q, got %q", i, expected, batch1[i])
 		}
 	}
 
-	// Batcher has default name.
-	if batcher.Name() == "" {
-		t.Errorf("expected non-empty name, got empty string")
+	// Should receive second batch with remaining 2 items (flushed on close)
+	result2 := <-out
+	if result2.IsError() {
+		t.Errorf("unexpected error: %v", result2.Error())
+	}
+	batch2 := result2.Value()
+	if len(batch2) != 2 {
+		t.Errorf("expected second batch size 2, got %d", len(batch2))
+	}
+	expected2 := []string{"fourth", "fifth"}
+	for i, expected := range expected2 {
+		if batch2[i] != expected {
+			t.Errorf("expected batch2[%d] = %q, got %q", i, expected, batch2[i])
+		}
+	}
+
+	// Channel should be closed
+	_, ok := <-out
+	if ok {
+		t.Error("expected channel to be closed")
 	}
 }
 
-// TestBatcherByTime tests batching by time.
-// Note: This test uses real clock because the batcher's timer logic
-// requires careful coordination between item arrival and timer resets.
-func TestBatcherByTime(t *testing.T) {
+func TestBatcher_TimeBasedBatching(t *testing.T) {
+	clock := clockz.NewFakeClock()
+	batcher := NewBatcher[int](BatchConfig{
+		MaxSize:    10,
+		MaxLatency: 100 * time.Millisecond,
+	}, clock)
 	ctx := context.Background()
 
-	config := BatchConfig{
-		MaxSize:    100, // Effectively disabled.
-		MaxLatency: 50 * time.Millisecond,
+	in := make(chan Result[int])
+	out := batcher.Process(ctx, in)
+
+	// Send items without reaching size limit
+	in <- NewSuccess(1)
+	in <- NewSuccess(2)
+
+	// Should not receive batch immediately
+	select {
+	case result := <-out:
+		t.Errorf("unexpected immediate result: %v", result)
+	default:
+		// Good, nothing received yet
 	}
 
-	batcher := NewBatcher[int](config, RealClock)
+	// Advance time to trigger timer
+	clock.Advance(100 * time.Millisecond)
+	clock.BlockUntilReady() // Ensure timer processed before continuing
 
-	input := make(chan int)
-	output := batcher.Process(ctx, input)
+	// Now should receive the time-triggered batch
+	result := <-out
+	if result.IsError() {
+		t.Errorf("unexpected error: %v", result.Error())
+	}
+	batch := result.Value()
+	if len(batch) != 2 {
+		t.Errorf("expected batch size 2, got %d", len(batch))
+	}
+	if batch[0] != 1 || batch[1] != 2 {
+		t.Errorf("expected batch [1, 2], got %v", batch)
+	}
 
-	var batches [][]int
-	var mu sync.Mutex
-	done := make(chan bool)
+	close(in)
 
-	// Collector.
-	go func() {
-		for batch := range output {
-			mu.Lock()
-			batches = append(batches, batch)
-			mu.Unlock()
+	// Channel should be closed
+	_, ok := <-out
+	if ok {
+		t.Error("expected channel to be closed")
+	}
+}
+
+func TestBatcher_ErrorsPassThrough(t *testing.T) {
+	clock := clockz.NewFakeClock()
+	batcher := NewBatcher[string](BatchConfig{
+		MaxSize:    3,
+		MaxLatency: 100 * time.Millisecond,
+	}, clock)
+	ctx := context.Background()
+
+	in := make(chan Result[string], 5)
+	in <- NewSuccess("item1")
+	in <- NewError("", errors.New("test error"), "test-processor")
+	in <- NewSuccess("item2")
+	in <- NewSuccess("item3")
+	close(in)
+
+	out := batcher.Process(ctx, in)
+
+	// Should immediately receive the error
+	result1 := <-out
+	if !result1.IsError() {
+		t.Error("expected error result")
+	}
+	if result1.Error().Err.Error() != "test error" {
+		t.Errorf("expected error 'test error', got %q", result1.Error().Err.Error())
+	}
+
+	// Should receive batch with successful items (flushed on close)
+	result2 := <-out
+	if result2.IsError() {
+		t.Errorf("unexpected error: %v", result2.Error())
+	}
+	batch := result2.Value()
+	if len(batch) != 3 {
+		t.Errorf("expected batch size 3, got %d", len(batch))
+	}
+	expected := []string{"item1", "item2", "item3"}
+	for i, exp := range expected {
+		if batch[i] != exp {
+			t.Errorf("expected batch[%d] = %q, got %q", i, exp, batch[i])
 		}
-		done <- true
-	}()
+	}
 
-	// Send items in bursts.
-	// First burst.
+	// Channel should be closed
+	_, ok := <-out
+	if ok {
+		t.Error("expected channel to be closed")
+	}
+}
+
+func TestBatcher_MultipleErrors(t *testing.T) {
+	clock := clockz.NewFakeClock()
+	batcher := NewBatcher[int](BatchConfig{MaxSize: 10}, clock)
+	ctx := context.Background()
+
+	in := make(chan Result[int], 3)
+	in <- NewError(0, errors.New("error 1"), "processor-1")
+	in <- NewError(0, errors.New("error 2"), "processor-2")
+	in <- NewError(0, errors.New("error 3"), "processor-3")
+	close(in)
+
+	out := batcher.Process(ctx, in)
+
+	// Should receive all errors immediately
 	for i := 1; i <= 3; i++ {
-		input <- i
-	}
-
-	// Wait for time trigger.
-	time.Sleep(100 * time.Millisecond)
-
-	// Second burst.
-	for i := 4; i <= 6; i++ {
-		input <- i
-	}
-
-	// Wait for time trigger.
-	time.Sleep(100 * time.Millisecond)
-
-	close(input)
-	<-done
-
-	mu.Lock()
-	defer mu.Unlock()
-
-	if len(batches) != 2 {
-		t.Fatalf("expected 2 time-based batches, got %d", len(batches))
-	}
-
-	if len(batches[0]) != 3 {
-		t.Errorf("first batch: expected 3 items, got %d", len(batches[0]))
-	}
-
-	if len(batches[1]) != 3 {
-		t.Errorf("second batch: expected 3 items, got %d", len(batches[1]))
-	}
-}
-
-// TestBatcherMixedTriggers tests both size and time triggers.
-func TestBatcherMixedTriggers(t *testing.T) {
-	ctx := context.Background()
-
-	config := BatchConfig{
-		MaxSize:    5,
-		MaxLatency: 100 * time.Millisecond,
-	}
-
-	batcher := NewBatcher[string](config, RealClock)
-
-	input := make(chan string)
-	output := batcher.Process(ctx, input)
-
-	var batches [][]string
-	var mu sync.Mutex
-	done := make(chan bool)
-
-	go func() {
-		for batch := range output {
-			mu.Lock()
-			batches = append(batches, batch)
-			mu.Unlock()
+		result := <-out
+		if !result.IsError() {
+			t.Errorf("expected error result %d", i)
 		}
-		done <- true
-	}()
-
-	// Quick burst - should trigger size.
-	for i := 0; i < 5; i++ {
-		input <- fmt.Sprintf("quick-%d", i)
+		expectedMsg := "error " + string(rune('0'+i))
+		if result.Error().Err.Error() != expectedMsg {
+			t.Errorf("expected error %q, got %q", expectedMsg, result.Error().Err.Error())
+		}
 	}
 
-	// Wait a bit.
-	time.Sleep(50 * time.Millisecond)
-
-	// Slow items - should trigger time.
-	input <- "slow-1"
-	input <- "slow-2"
-
-	// Wait for time trigger.
-	time.Sleep(150 * time.Millisecond)
-
-	close(input)
-	<-done
-
-	mu.Lock()
-	defer mu.Unlock()
-
-	if len(batches) != 2 {
-		t.Fatalf("expected 2 batches (1 size, 1 time), got %d", len(batches))
-	}
-
-	if len(batches[0]) != 5 {
-		t.Errorf("first batch (size-triggered): expected 5 items, got %d", len(batches[0]))
-	}
-
-	if len(batches[1]) != 2 {
-		t.Errorf("second batch (time-triggered): expected 2 items, got %d", len(batches[1]))
+	// Channel should be closed
+	_, ok := <-out
+	if ok {
+		t.Error("expected channel to be closed")
 	}
 }
 
-// TestBatcherEmptyInput tests batcher with empty input.
-func TestBatcherEmptyInput(t *testing.T) {
-	ctx := context.Background()
-
-	config := BatchConfig{
+func TestBatcher_ErrorsWithTimeBasedBatch(t *testing.T) {
+	clock := clockz.NewFakeClock()
+	batcher := NewBatcher[int](BatchConfig{
 		MaxSize:    10,
 		MaxLatency: 100 * time.Millisecond,
-	}
-
-	batcher := NewBatcher[int](config, RealClock)
-
-	input := make(chan int)
-	close(input)
-
-	output := batcher.Process(ctx, input)
-
-	count := 0
-	for range output {
-		count++
-	}
-
-	if count != 0 {
-		t.Errorf("expected 0 batches for empty input, got %d", count)
-	}
-}
-
-// TestBatcherSingleItem tests batching with a single item.
-func TestBatcherSingleItem(t *testing.T) {
+	}, clock)
 	ctx := context.Background()
 
-	config := BatchConfig{
-		MaxSize:    10,
-		MaxLatency: 100 * time.Millisecond,
+	in := make(chan Result[int])
+	out := batcher.Process(ctx, in)
+
+	// Send successful items
+	in <- NewSuccess(1)
+	in <- NewSuccess(2)
+
+	// Send error - should pass through immediately
+	in <- NewError(0, errors.New("test error"), "test-processor")
+
+	// Should immediately receive the error
+	result1 := <-out
+	if !result1.IsError() {
+		t.Error("expected error result")
 	}
 
-	batcher := NewBatcher[int](config, RealClock)
-
-	input := make(chan int, 1)
-	input <- 42
-	close(input)
-
-	output := batcher.Process(ctx, input)
-
-	batches := make([][]int, 0, 1)
-	for batch := range output {
-		batches = append(batches, batch)
+	// Should not receive batch yet (timer still running)
+	select {
+	case result := <-out:
+		t.Errorf("unexpected result before timer: %v", result)
+	default:
+		// Good, timer still running
 	}
 
-	if len(batches) != 1 {
-		t.Fatalf("expected 1 batch, got %d", len(batches))
+	// Advance time to trigger batch
+	clock.Advance(100 * time.Millisecond)
+	clock.BlockUntilReady() // Ensure timer processed before input
+
+	// Now should receive the time-triggered batch
+	result2 := <-out
+	if result2.IsError() {
+		t.Errorf("unexpected error: %v", result2.Error())
+	}
+	batch := result2.Value()
+	if len(batch) != 2 {
+		t.Errorf("expected batch size 2, got %d", len(batch))
+	}
+	if batch[0] != 1 || batch[1] != 2 {
+		t.Errorf("expected batch [1, 2], got %v", batch)
 	}
 
-	if len(batches[0]) != 1 || batches[0][0] != 42 {
-		t.Errorf("expected batch [42], got %v", batches[0])
+	close(in)
+
+	// Channel should be closed
+	_, ok := <-out
+	if ok {
+		t.Error("expected channel to be closed")
 	}
 }
 
-// TestBatcherContextCancellation tests graceful shutdown.
-func TestBatcherContextCancellation(t *testing.T) {
+func TestBatcher_ContextCancellation(t *testing.T) {
+	clock := clockz.NewFakeClock()
+	batcher := NewBatcher[string](BatchConfig{
+		MaxSize:    10,
+		MaxLatency: 100 * time.Millisecond,
+	}, clock)
 	ctx, cancel := context.WithCancel(context.Background())
 
-	config := BatchConfig{
-		MaxSize:    10,
-		MaxLatency: 50 * time.Millisecond,
-	}
+	in := make(chan Result[string])
+	out := batcher.Process(ctx, in)
 
-	batcher := NewBatcher[int](config, RealClock)
+	// Send items
+	in <- NewSuccess("test1")
+	in <- NewSuccess("test2")
 
-	input := make(chan int)
-	output := batcher.Process(ctx, input)
-
-	var batchCount int
-	done := make(chan bool)
-
-	go func() {
-		for range output {
-			batchCount++
-		}
-		done <- true
-	}()
-
-	// Send items continuously.
-	go func() {
-		for i := 0; ; i++ {
-			select {
-			case input <- i:
-				time.Sleep(10 * time.Millisecond)
-			case <-ctx.Done():
-				close(input)
-				return
-			}
-		}
-	}()
-
-	// Let some batches process.
-	time.Sleep(200 * time.Millisecond)
+	// Cancel context before timer fires
 	cancel()
 
-	<-done
-
-	// Should have received some batches.
-	if batchCount == 0 {
-		t.Error("expected some batches before cancellation")
+	// Should not receive anything due to cancellation
+	select {
+	case result := <-out:
+		t.Errorf("unexpected result after cancellation: %v", result)
+	default:
+		// Good, nothing received
 	}
+
+	// Channel should eventually be closed
+	_, ok := <-out
+	if ok {
+		t.Error("expected channel to be closed")
+	}
+
+	close(in)
 }
 
-// TestBatcherConfiguration tests configuration edge cases.
-func TestBatcherConfiguration(t *testing.T) {
-	ctx := context.Background()
-
-	// Test zero/negative size defaults to 1.
-	config1 := BatchConfig{
-		MaxSize:    0,
+func TestBatcher_ContextCancellationDuringOutput(t *testing.T) {
+	clock := clockz.NewFakeClock()
+	batcher := NewBatcher[string](BatchConfig{
+		MaxSize:    10,
 		MaxLatency: 100 * time.Millisecond,
-	}
-	batcher1 := NewBatcher[int](config1, RealClock)
+	}, clock)
+	ctx, cancel := context.WithCancel(context.Background())
 
-	input1 := make(chan int, 3)
-	input1 <- 1
-	input1 <- 2
-	input1 <- 3
-	close(input1)
+	in := make(chan Result[string])
+	out := batcher.Process(ctx, in)
 
-	output1 := batcher1.Process(ctx, input1)
+	// Send items
+	in <- NewSuccess("test1")
+	in <- NewSuccess("test2")
 
-	batchCount := 0
-	for batch := range output1 {
-		batchCount++
-		if len(batch) != 1 {
-			t.Errorf("expected batch size 1 (min), got %d", len(batch))
+	// Cancel context immediately
+	cancel()
+
+	// Channel should eventually be closed without emitting batch
+	select {
+	case result, ok := <-out:
+		if !ok {
+			// Channel closed without emitting - this is acceptable
+			return
 		}
+		// If we get a result, it might be a race between timer and cancellation
+		// This is actually acceptable behavior - the timer fired just before cancellation
+		t.Logf("Got result after cancellation (race condition): %v", result)
+	case <-time.After(50 * time.Millisecond):
+		t.Error("timeout waiting for channel action")
 	}
 
-	if batchCount != 3 {
-		t.Errorf("expected 3 batches of size 1, got %d", batchCount)
+	// Consume any remaining items and verify channel closes
+	//nolint:revive // empty-block: intentional channel draining
+	for range out {
+		// Drain channel until closed
 	}
 
-	// Test zero latency triggers immediately.
-	config2 := BatchConfig{
-		MaxSize:    2,
-		MaxLatency: 0,
-	}
-	batcher2 := NewBatcher[int](config2, RealClock)
+	close(in)
+}
 
-	input2 := make(chan int, 5)
-	for i := 1; i <= 5; i++ {
-		input2 <- i
-	}
-	close(input2)
+func TestBatcher_EmptyInput(t *testing.T) {
+	clock := clockz.NewFakeClock()
+	batcher := NewBatcher[string](BatchConfig{MaxSize: 10}, clock)
+	ctx := context.Background()
 
-	output2 := batcher2.Process(ctx, input2)
+	in := make(chan Result[string])
+	close(in)
 
-	batches := make([][]int, 0, 3) // 5 items with batch size 2 = 3 batches
-	for batch := range output2 {
-		batches = append(batches, batch)
-	}
+	out := batcher.Process(ctx, in)
 
-	// With zero latency and size 2, we should get multiple batches.
-	if len(batches) < 2 {
-		t.Fatalf("expected multiple batches with zero latency, got %d", len(batches))
-	}
-
-	// Total items should still be 5.
-	totalItems := 0
-	for _, batch := range batches {
-		totalItems += len(batch)
-	}
-	if totalItems != 5 {
-		t.Errorf("expected 5 total items, got %d", totalItems)
+	// Should not receive anything and channel should be closed
+	_, ok := <-out
+	if ok {
+		t.Error("expected channel to be closed immediately")
 	}
 }
 
-// BenchmarkBatcher benchmarks batching performance.
-func BenchmarkBatcher(b *testing.B) {
+func TestBatcher_NoLatencyConfig(t *testing.T) {
+	clock := clockz.NewFakeClock()
+	batcher := NewBatcher[int](BatchConfig{
+		MaxSize: 3, // No MaxLatency configured
+	}, clock)
 	ctx := context.Background()
 
-	config := BatchConfig{
-		MaxSize:    100,
-		MaxLatency: 10 * time.Millisecond,
+	in := make(chan Result[int])
+	out := batcher.Process(ctx, in)
+
+	// Send items without reaching size limit
+	in <- NewSuccess(1)
+	in <- NewSuccess(2)
+
+	// Should not receive batch (no timer started)
+	select {
+	case result := <-out:
+		t.Errorf("unexpected result without timer: %v", result)
+	default:
+		// Good, no timer = no time-based batching
 	}
 
-	batcher := NewBatcher[int](config, RealClock)
+	// Advance time (should have no effect)
+	clock.Advance(time.Hour)
+
+	select {
+	case result := <-out:
+		t.Errorf("unexpected result after time advance: %v", result)
+	default:
+		// Good, no timer was created
+	}
+
+	// Close channel should flush pending batch
+	close(in)
+
+	result := <-out
+	if result.IsError() {
+		t.Errorf("unexpected error: %v", result.Error())
+	}
+	batch := result.Value()
+	if len(batch) != 2 {
+		t.Errorf("expected batch size 2, got %d", len(batch))
+	}
+
+	// Channel should be closed
+	_, ok := <-out
+	if ok {
+		t.Error("expected channel to be closed")
+	}
+}
+
+func TestBatcher_TimerResetBehavior(t *testing.T) {
+	clock := clockz.NewFakeClock()
+	batcher := NewBatcher[int](BatchConfig{
+		MaxSize:    10,
+		MaxLatency: 100 * time.Millisecond,
+	}, clock)
+	ctx := context.Background()
+
+	in := make(chan Result[int])
+	out := batcher.Process(ctx, in)
+
+	// Send first batch
+	in <- NewSuccess(1)
+	in <- NewSuccess(2)
+
+	// Advance time to trigger first batch
+	clock.Advance(100 * time.Millisecond)
+	clock.BlockUntilReady() // First batch timer
+
+	// Should receive first batch
+	result1 := <-out
+	if result1.IsError() {
+		t.Errorf("unexpected error: %v", result1.Error())
+	}
+	batch1 := result1.Value()
+	if len(batch1) != 2 {
+		t.Errorf("expected first batch size 2, got %d", len(batch1))
+	}
+
+	// Send second batch
+	in <- NewSuccess(3)
+	in <- NewSuccess(4)
+
+	// Timer should be reset for new batch
+	// Advance less than timeout duration
+	clock.Advance(50 * time.Millisecond)
+
+	// Should not receive second batch yet
+	select {
+	case result := <-out:
+		t.Errorf("unexpected early result: %v", result)
+	default:
+		// Good, timer still running
+	}
+
+	// Advance remaining time to trigger second batch
+	clock.Advance(50 * time.Millisecond)
+	clock.BlockUntilReady() // Second batch timer
+
+	// Should receive second batch
+	result2 := <-out
+	if result2.IsError() {
+		t.Errorf("unexpected error: %v", result2.Error())
+	}
+	batch2 := result2.Value()
+	if len(batch2) != 2 {
+		t.Errorf("expected second batch size 2, got %d", len(batch2))
+	}
+
+	close(in)
+
+	// Channel should be closed
+	_, ok := <-out
+	if ok {
+		t.Error("expected channel to be closed")
+	}
+}
+
+func TestBatcher_SizeAndTimeInteraction(t *testing.T) {
+	clock := clockz.NewFakeClock()
+	batcher := NewBatcher[int](BatchConfig{
+		MaxSize:    3,
+		MaxLatency: 100 * time.Millisecond,
+	}, clock)
+	ctx := context.Background()
+
+	in := make(chan Result[int])
+	out := batcher.Process(ctx, in)
+
+	// Send items that reach size limit before timeout
+	in <- NewSuccess(1)
+	in <- NewSuccess(2)
+	in <- NewSuccess(3) // Should trigger size-based batch
+
+	// Should receive batch immediately due to size limit
+	result1 := <-out
+	if result1.IsError() {
+		t.Errorf("unexpected error: %v", result1.Error())
+	}
+	batch1 := result1.Value()
+	if len(batch1) != 3 {
+		t.Errorf("expected batch size 3, got %d", len(batch1))
+	}
+
+	// Send partial batch
+	in <- NewSuccess(4)
+	in <- NewSuccess(5)
+
+	// Should not receive anything immediately
+	select {
+	case result := <-out:
+		t.Errorf("unexpected immediate result: %v", result)
+	default:
+		// Good, waiting for timer or size limit
+	}
+
+	// Advance time to trigger time-based batch
+	clock.Advance(100 * time.Millisecond)
+	clock.BlockUntilReady() // Ensure timer processed
+
+	// Should receive second batch via timeout
+	result2 := <-out
+	if result2.IsError() {
+		t.Errorf("unexpected error: %v", result2.Error())
+	}
+	batch2 := result2.Value()
+	if len(batch2) != 2 {
+		t.Errorf("expected batch size 2, got %d", len(batch2))
+	}
+
+	close(in)
+
+	// Channel should be closed
+	_, ok := <-out
+	if ok {
+		t.Error("expected channel to be closed")
+	}
+}
+
+// Benchmark tests for performance validation
+
+// BenchmarkBatcher_SizeBasedBatching tests size-based batching performance.
+func BenchmarkBatcher_SizeBasedBatching(b *testing.B) {
+	batcher := NewBatcher[int](BatchConfig{MaxSize: 100}, RealClock)
+	ctx := context.Background()
 
 	b.ResetTimer()
-	b.ReportAllocs()
-
-	input := make(chan int, b.N)
-	output := batcher.Process(ctx, input)
-
-	// Consumer.
-	done := make(chan bool)
-	go func() {
-		//nolint:revive // empty-block: necessary to drain channel
-		for range output {
-			// Consume.
-		}
-		done <- true
-	}()
-
-	// Producer.
 	for i := 0; i < b.N; i++ {
-		input <- i
-	}
-	close(input)
+		in := make(chan Result[int], 100)
 
-	<-done
+		// Fill channel with 100 items
+		for j := 0; j < 100; j++ {
+			in <- NewSuccess(j)
+		}
+		close(in)
+
+		out := batcher.Process(ctx, in)
+		<-out // Wait for batch
+	}
 }
 
-// Example demonstrates batching for efficient database operations.
-func ExampleBatcher() {
+// BenchmarkBatcher_TimeBasedBatching tests time-based batching performance.
+func BenchmarkBatcher_TimeBasedBatching(b *testing.B) {
+	batcher := NewBatcher[int](BatchConfig{
+		MaxSize:    1000,
+		MaxLatency: time.Nanosecond, // Very short duration for benchmark
+	}, RealClock)
 	ctx := context.Background()
 
-	// Configure batching for database inserts.
-	config := BatchConfig{
-		MaxSize:    100,                    // Insert up to 100 records at once.
-		MaxLatency: 500 * time.Millisecond, // Or every 500ms.
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		in := make(chan Result[int], 1)
+		in <- NewSuccess(i)
+		close(in)
+
+		out := batcher.Process(ctx, in)
+		<-out // Wait for batch
 	}
+}
 
-	batcher := NewBatcher[string](config, RealClock)
+// BenchmarkBatcher_ErrorPassthrough tests error handling performance.
+func BenchmarkBatcher_ErrorPassthrough(b *testing.B) {
+	batcher := NewBatcher[int](BatchConfig{MaxSize: 100}, RealClock)
+	ctx := context.Background()
 
-	// Simulate incoming user events.
-	events := make(chan string, 10)
-	events <- "user-login:alice"
-	events <- "user-login:bob"
-	events <- "page-view:home"
-	events <- "user-login:carol"
-	events <- "page-view:about"
-	close(events)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		in := make(chan Result[int], 1)
+		in <- NewError(i, errors.New("test error"), "test-processor")
+		close(in)
 
-	// Process batches.
-	batches := batcher.Process(ctx, events)
+		out := batcher.Process(ctx, in)
+		<-out // Wait for error result
+	}
+}
 
-	batchNum := 1
-	for batch := range batches {
-		fmt.Printf("Batch %d (%d events):\n", batchNum, len(batch))
-		for _, event := range batch {
-			fmt.Printf("  - %s\n", event)
+// BenchmarkBatcher_MixedItems tests performance with mixed success/error items.
+func BenchmarkBatcher_MixedItems(b *testing.B) {
+	batcher := NewBatcher[int](BatchConfig{MaxSize: 10}, RealClock)
+	ctx := context.Background()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		in := make(chan Result[int], 20)
+
+		// Mix of success and error items
+		for j := 0; j < 20; j++ {
+			if j%3 == 0 {
+				in <- NewError(j, errors.New("test error"), "test-processor")
+			} else {
+				in <- NewSuccess(j)
+			}
 		}
-		batchNum++
-	}
+		close(in)
 
-	// Output:
-	// Batch 1 (5 events):
-	//   - user-login:alice
-	//   - user-login:bob
-	//   - page-view:home
-	//   - user-login:carol
-	//   - page-view:about
+		out := batcher.Process(ctx, in)
+
+		// Consume all results
+		//nolint:revive // empty-block: intentional channel draining
+		for range out {
+		}
+	}
 }

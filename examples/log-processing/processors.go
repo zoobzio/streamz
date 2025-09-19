@@ -231,15 +231,18 @@ type RateLimiter struct {
 	tokens     int64
 	lastRefill time.Time
 	mutex      sync.Mutex
+	clock      streamz.Clock
 }
 
 // NewRateLimiter creates a new rate limiter.
-func NewRateLimiter(ratePerSec int) *RateLimiter {
+// Uses provided clock for deterministic testing.
+func NewRateLimiter(ratePerSec int, clock streamz.Clock) *RateLimiter {
 	return &RateLimiter{
 		name:       fmt.Sprintf("rate-limiter-%d", ratePerSec),
 		ratePerSec: ratePerSec,
 		tokens:     int64(ratePerSec),
-		lastRefill: time.Now(),
+		lastRefill: clock.Now(),
+		clock:      clock,
 	}
 }
 
@@ -255,7 +258,7 @@ func (rl *RateLimiter) Process(ctx context.Context, in <-chan LogEntry) <-chan L
 	go func() {
 		defer close(out)
 
-		ticker := time.NewTicker(time.Second / time.Duration(rl.ratePerSec))
+		ticker := rl.clock.NewTicker(time.Second / time.Duration(rl.ratePerSec))
 		defer ticker.Stop()
 
 		for {
@@ -282,6 +285,17 @@ func (rl *RateLimiter) Process(ctx context.Context, in <-chan LogEntry) <-chan L
 
 	return out
 }
+
+// Example usage demonstrating proper clock injection:
+//
+//   // For production
+//   limiter := NewRateLimiter(100, streamz.RealClock)
+//
+//   // For testing
+//   fakeClock := streamz.NewFakeClock()
+//   limiter := NewRateLimiter(100, fakeClock)
+//   // Now you can control timing in tests
+//   fakeClock.Add(time.Second) // Advance time deterministically
 
 // MetricsCollectorProcessor collects metrics about log processing.
 type MetricsCollectorProcessor struct {
@@ -355,15 +369,15 @@ func (mc *MetricsCollectorProcessor) Process(ctx context.Context, in <-chan LogE
 func (mc *MetricsCollectorProcessor) GetMetrics() Metrics {
 	mc.mu.RLock()
 	m := Metrics{
-		StartTime:       mc.metrics.StartTime,
-		CurrentRate:     mc.metrics.CurrentRate,
-		PeakRate:        mc.metrics.PeakRate,
-		AverageLatency:  mc.metrics.AverageLatency,
-		LastError:       mc.metrics.LastError,
-		LastErrorTime:   mc.metrics.LastErrorTime,
+		StartTime:      mc.metrics.StartTime,
+		CurrentRate:    mc.metrics.CurrentRate,
+		PeakRate:       mc.metrics.PeakRate,
+		AverageLatency: mc.metrics.AverageLatency,
+		LastError:      mc.metrics.LastError,
+		LastErrorTime:  mc.metrics.LastErrorTime,
 	}
 	mc.mu.RUnlock()
-	
+
 	// Use atomic loads for all counter fields
 	m.LogsProcessed = atomic.LoadInt64(&mc.metrics.LogsProcessed)
 	m.LogsStored = atomic.LoadInt64(&mc.metrics.LogsStored)
@@ -373,7 +387,7 @@ func (mc *MetricsCollectorProcessor) GetMetrics() Metrics {
 	m.BatchesCreated = atomic.LoadInt64(&mc.metrics.BatchesCreated)
 	m.DatabaseWrites = atomic.LoadInt64(&mc.metrics.DatabaseWrites)
 	m.ProcessingErrors = atomic.LoadInt64(&mc.metrics.ProcessingErrors)
-	
+
 	return m
 }
 

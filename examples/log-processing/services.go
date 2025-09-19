@@ -7,6 +7,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	. "github.com/zoobzio/streamz"
 )
 
 // Mock external services for demonstration.
@@ -14,6 +16,7 @@ import (
 
 // DatabaseService simulates a database for storing logs.
 type DatabaseService struct {
+	clock        Clock
 	writeLatency time.Duration
 	failureRate  float64
 	totalWrites  int64
@@ -24,8 +27,9 @@ type DatabaseService struct {
 }
 
 // NewDatabaseService creates a mock database service.
-func NewDatabaseService() *DatabaseService {
+func NewDatabaseService(clock Clock) *DatabaseService {
 	return &DatabaseService{
+		clock:        clock,
 		writeLatency: 50 * time.Millisecond, // Simulated write latency
 		failureRate:  0.0,
 		isHealthy:    true,
@@ -44,7 +48,7 @@ func (db *DatabaseService) WriteLogs(ctx context.Context, logs []LogEntry) error
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(db.writeLatency):
+		case <-db.clock.After(db.writeLatency):
 			atomic.AddInt64(&db.totalWrites, 1)
 
 			// Simulate random failures
@@ -69,7 +73,7 @@ func (db *DatabaseService) WriteBatch(ctx context.Context, batch LogBatch) error
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-time.After(db.writeLatency + time.Duration(batch.Count)*time.Millisecond):
+	case <-db.clock.After(db.writeLatency + time.Duration(batch.Count)*time.Millisecond):
 		atomic.AddInt64(&db.totalWrites, int64(batch.Count))
 		atomic.AddInt64(&db.batchWrites, 1)
 
@@ -105,6 +109,7 @@ func (db *DatabaseService) GetStats() (total, failed, batches int64) {
 
 // AlertService simulates an alerting system (PagerDuty, Slack, etc.).
 type AlertService struct {
+	clock       Clock
 	alerts      []Alert
 	sendLatency time.Duration
 	failureRate float64
@@ -113,8 +118,9 @@ type AlertService struct {
 }
 
 // NewAlertService creates a mock alert service.
-func NewAlertService() *AlertService {
+func NewAlertService(clock Clock) *AlertService {
 	return &AlertService{
+		clock:       clock,
 		sendLatency: 100 * time.Millisecond, // Simulated API call latency
 		failureRate: 0.0,
 		alerts:      make([]Alert, 0),
@@ -126,7 +132,7 @@ func (as *AlertService) SendAlert(ctx context.Context, alert Alert) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-time.After(as.sendLatency):
+	case <-as.clock.After(as.sendLatency):
 		if rand.Float64() < as.failureRate {
 			return fmt.Errorf("failed to send alert: %s", alert.Title)
 		}
@@ -163,6 +169,7 @@ func (as *AlertService) GetAlertCount() int64 {
 
 // UserService simulates a user information service.
 type UserService struct {
+	clock         Clock
 	users         map[string]string // userID -> userName
 	lookupLatency time.Duration
 	cacheHitRate  float64
@@ -170,8 +177,9 @@ type UserService struct {
 }
 
 // NewUserService creates a mock user service.
-func NewUserService() *UserService {
+func NewUserService(clock Clock) *UserService {
 	return &UserService{
+		clock: clock,
 		users: map[string]string{
 			"user-001": "Alice Johnson",
 			"user-002": "Bob Smith",
@@ -203,7 +211,7 @@ func (us *UserService) LookupUser(ctx context.Context, userID string) (string, e
 	select {
 	case <-ctx.Done():
 		return "", ctx.Err()
-	case <-time.After(us.lookupLatency):
+	case <-us.clock.After(us.lookupLatency):
 		us.mutex.RLock()
 		name, exists := us.users[userID]
 		us.mutex.RUnlock()
@@ -217,14 +225,16 @@ func (us *UserService) LookupUser(ctx context.Context, userID string) (string, e
 
 // SecurityService simulates a security analysis service.
 type SecurityService struct {
+	clock           Clock
 	detectedThreats []SecurityAlert
 	analysisLatency time.Duration
 	mutex           sync.Mutex
 }
 
 // NewSecurityService creates a mock security service.
-func NewSecurityService() *SecurityService {
+func NewSecurityService(clock Clock) *SecurityService {
 	return &SecurityService{
+		clock:           clock,
 		analysisLatency: 5 * time.Millisecond,
 		detectedThreats: make([]SecurityAlert, 0),
 	}
@@ -235,7 +245,7 @@ func (ss *SecurityService) AnalyzeLog(ctx context.Context, log LogEntry) (*Secur
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
-	case <-time.After(ss.analysisLatency):
+	case <-ss.clock.After(ss.analysisLatency):
 		// Check against security patterns
 		for _, pattern := range SecurityPatterns {
 			for _, p := range pattern.Patterns {
@@ -361,10 +371,10 @@ func getRemediation(threatType string) string {
 
 // Global service instances
 var (
-	Database = NewDatabaseService()
-	Alerting = NewAlertService()
-	Users    = NewUserService()
-	Security = NewSecurityService()
+	Database = NewDatabaseService(RealClock)
+	Alerting = NewAlertService(RealClock)
+	Users    = NewUserService(RealClock)
+	Security = NewSecurityService(RealClock)
 )
 
 // TestMode speeds up demos
@@ -372,8 +382,8 @@ var TestMode = false
 
 // ResetServices resets all services to initial state.
 func ResetServices() {
-	Database = NewDatabaseService()
-	Alerting = NewAlertService()
-	Users = NewUserService()
-	Security = NewSecurityService()
+	Database = NewDatabaseService(RealClock)
+	Alerting = NewAlertService(RealClock)
+	Users = NewUserService(RealClock)
+	Security = NewSecurityService(RealClock)
 }

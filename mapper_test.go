@@ -2,343 +2,395 @@ package streamz
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
-// TestMapperBasicFunctionality tests basic mapping operations.
-func TestMapperBasicFunctionality(t *testing.T) {
-	ctx := context.Background()
-
-	// Create a mapper that doubles integers.
-	doubler := NewMapper(func(n int) int {
-		return n * 2
-	}).WithName("doubler")
-
-	// Test input.
-	input := make(chan int, 5)
-	for i := 1; i <= 5; i++ {
-		input <- i
-	}
-	close(input)
-
-	// Process.
-	output := doubler.Process(ctx, input)
-
-	// Verify.
-	expected := []int{2, 4, 6, 8, 10}
-	results := make([]int, 0, len(expected))
-	for result := range output {
-		results = append(results, result)
-	}
-
-	if len(results) != len(expected) {
-		t.Errorf("expected %d results, got %d", len(expected), len(results))
-	}
-
-	for i, result := range results {
-		if result != expected[i] {
-			t.Errorf("position %d: expected %d, got %d", i, expected[i], result)
-		}
-	}
-
-	if doubler.Name() != "doubler" {
-		t.Errorf("expected name 'doubler', got %s", doubler.Name())
-	}
-}
-
-// TestMapperTypeTransformation tests mapping between different types.
-func TestMapperTypeTransformation(t *testing.T) {
-	ctx := context.Background()
-
-	// Create a mapper that converts integers to strings.
-	stringifier := NewMapper(func(n int) string {
-		return fmt.Sprintf("number-%d", n)
+func TestMapper_BasicTransformation(t *testing.T) {
+	// Create a mapper that doubles integers
+	mapper := NewMapper(func(_ context.Context, n int) (int, error) {
+		return n * 2, nil
 	})
 
-	input := make(chan int, 3)
-	input <- 1
-	input <- 2
-	input <- 3
+	// Test data
+	input := make(chan Result[int], 3)
+	input <- NewSuccess(1)
+	input <- NewSuccess(2)
+	input <- NewSuccess(3)
 	close(input)
 
-	output := stringifier.Process(ctx, input)
+	// Process
+	ctx := context.Background()
+	results := mapper.Process(ctx, input)
 
-	expected := []string{"number-1", "number-2", "number-3"}
-	results := make([]string, 0, len(expected))
-	for result := range output {
-		results = append(results, result)
+	// Collect results
+	outputs := make([]int, 0, 3)
+	for result := range results {
+		if result.IsError() {
+			t.Fatalf("Unexpected error: %v", result.Error())
+		}
+		outputs = append(outputs, result.Value())
 	}
 
-	if len(results) != len(expected) {
-		t.Errorf("expected %d results, got %d", len(expected), len(results))
+	// Verify
+	expected := []int{2, 4, 6}
+	if len(outputs) != len(expected) {
+		t.Fatalf("Expected %d results, got %d", len(expected), len(outputs))
 	}
-
-	for i, result := range results {
-		if result != expected[i] {
-			t.Errorf("position %d: expected %s, got %s", i, expected[i], result)
+	for i, exp := range expected {
+		if outputs[i] != exp {
+			t.Errorf("Expected outputs[%d] = %d, got %d", i, exp, outputs[i])
 		}
 	}
 }
 
-// TestMapperStructTransformation tests mapping with structs.
-func TestMapperStructTransformation(t *testing.T) {
+func TestMapper_TypeConversion(t *testing.T) {
+	// Create a mapper that converts int to string
+	mapper := NewMapper(func(_ context.Context, n int) (string, error) {
+		return strconv.Itoa(n), nil
+	})
+
+	// Test data
+	input := make(chan Result[int], 3)
+	input <- NewSuccess(42)
+	input <- NewSuccess(100)
+	input <- NewSuccess(-5)
+	close(input)
+
+	// Process
 	ctx := context.Background()
+	results := mapper.Process(ctx, input)
 
-	type User struct {
-		ID   int
-		Name string
+	// Collect results
+	outputs := make([]string, 0, 3)
+	for result := range results {
+		if result.IsError() {
+			t.Fatalf("Unexpected error: %v", result.Error())
+		}
+		outputs = append(outputs, result.Value())
 	}
 
-	type UserDTO struct {
-		ID          int
-		DisplayName string
+	// Verify
+	expected := []string{"42", "100", "-5"}
+	if len(outputs) != len(expected) {
+		t.Fatalf("Expected %d results, got %d", len(expected), len(outputs))
+	}
+	for i, exp := range expected {
+		if outputs[i] != exp {
+			t.Errorf("Expected outputs[%d] = %s, got %s", i, exp, outputs[i])
+		}
+	}
+}
+
+func TestMapper_ErrorHandling(t *testing.T) {
+	// Create a mapper that returns an error for negative numbers
+	mapper := NewMapper(func(_ context.Context, n int) (int, error) {
+		if n < 0 {
+			return 0, errors.New("negative number not allowed")
+		}
+		return n * 2, nil
+	})
+
+	// Test data with mixed success and error cases
+	input := make(chan Result[int], 4)
+	input <- NewSuccess(1)
+	input <- NewSuccess(-1) // This will cause an error
+	input <- NewSuccess(2)
+	input <- NewSuccess(-2) // This will cause an error
+	close(input)
+
+	// Process
+	ctx := context.Background()
+	results := mapper.Process(ctx, input)
+
+	// Collect results
+	var successes []int
+	var errorCount int
+	for result := range results {
+		if result.IsError() {
+			errorCount++
+			// Verify error contains expected message
+			if !strings.Contains(result.Error().Error(), "negative number not allowed") {
+				t.Errorf("Expected error message to contain 'negative number not allowed', got: %v", result.Error())
+			}
+		} else {
+			successes = append(successes, result.Value())
+		}
 	}
 
-	// Create a mapper that transforms User to UserDTO.
-	mapper := NewMapper(func(u User) UserDTO {
-		return UserDTO{
-			ID:          u.ID,
-			DisplayName: strings.ToUpper(u.Name),
+	// Verify
+	expectedSuccesses := []int{2, 4}
+	if len(successes) != len(expectedSuccesses) {
+		t.Fatalf("Expected %d successes, got %d", len(expectedSuccesses), len(successes))
+	}
+	if errorCount != 2 {
+		t.Fatalf("Expected 2 errors, got %d", errorCount)
+	}
+
+	for i, exp := range expectedSuccesses {
+		if successes[i] != exp {
+			t.Errorf("Expected successes[%d] = %d, got %d", i, exp, successes[i])
+		}
+	}
+}
+
+func TestMapper_PassThroughErrors(t *testing.T) {
+	// Create a simple mapper
+	mapper := NewMapper(func(_ context.Context, n int) (int, error) {
+		return n * 2, nil
+	})
+
+	// Test data with input errors
+	input := make(chan Result[int], 3)
+	input <- NewSuccess(1)
+	input <- NewError(0, errors.New("input error"), "test-source")
+	input <- NewSuccess(2)
+	close(input)
+
+	// Process
+	ctx := context.Background()
+	results := mapper.Process(ctx, input)
+
+	// Collect results
+	var successes []int
+	var errors []error
+	for result := range results {
+		if result.IsError() {
+			errors = append(errors, result.Error())
+		} else {
+			successes = append(successes, result.Value())
+		}
+	}
+
+	// Verify
+	expectedSuccesses := []int{2, 4}
+	if len(successes) != len(expectedSuccesses) {
+		t.Fatalf("Expected %d successes, got %d", len(expectedSuccesses), len(successes))
+	}
+	if len(errors) != 1 {
+		t.Fatalf("Expected 1 error, got %d", len(errors))
+	}
+
+	for i, exp := range expectedSuccesses {
+		if successes[i] != exp {
+			t.Errorf("Expected successes[%d] = %d, got %d", i, exp, successes[i])
+		}
+	}
+
+	// Verify the error contains original error information
+	if !strings.Contains(errors[0].Error(), "input error") {
+		t.Errorf("Expected passed-through error to contain 'input error', got: %v", errors[0])
+	}
+}
+
+func TestMapper_ContextCancellation(t *testing.T) {
+	// Create a mapper that could potentially block
+	mapper := NewMapper(func(ctx context.Context, n int) (int, error) {
+		select {
+		case <-time.After(100 * time.Millisecond):
+			return n * 2, nil
+		case <-ctx.Done():
+			return 0, ctx.Err()
 		}
 	})
 
-	input := make(chan User, 2)
-	input <- User{ID: 1, Name: "alice"}
-	input <- User{ID: 2, Name: "bob"}
+	// Test data
+	input := make(chan Result[int], 2)
+	input <- NewSuccess(1)
+	input <- NewSuccess(2)
+
+	// Create cancellable context
+	ctx, cancel := context.WithCancel(context.Background())
+	results := mapper.Process(ctx, input)
+
+	// Get the first result
+	result := <-results
+	if result.IsError() {
+		t.Fatalf("Unexpected error in first result: %v", result.Error())
+	}
+	if result.Value() != 2 {
+		t.Fatalf("Expected first result to be 2, got %d", result.Value())
+	}
+
+	// Cancel context immediately
+	cancel()
 	close(input)
 
-	output := mapper.Process(ctx, input)
+	// Verify that processing stops quickly
+	done := make(chan bool)
+	go func() {
+		for result := range results {
+			_ = result // Consume any remaining results
+		}
+		done <- true
+	}()
 
-	results := make([]UserDTO, 0, 2)
-	for dto := range output {
-		results = append(results, dto)
-	}
-
-	if len(results) != 2 {
-		t.Fatalf("expected 2 results, got %d", len(results))
-	}
-
-	if results[0].DisplayName != "ALICE" {
-		t.Errorf("expected display name 'ALICE', got %s", results[0].DisplayName)
-	}
-
-	if results[1].DisplayName != "BOB" {
-		t.Errorf("expected display name 'BOB', got %s", results[1].DisplayName)
+	select {
+	case <-done:
+		// Good - processing stopped
+	case <-time.After(500 * time.Millisecond):
+		t.Error("Processing did not stop promptly after context cancellation")
 	}
 }
 
-// TestMapperEmptyInput tests mapper with empty input.
-func TestMapperEmptyInput(t *testing.T) {
-	ctx := context.Background()
+func TestMapper_EmptyInput(t *testing.T) {
+	// Create a simple mapper
+	mapper := NewMapper(func(_ context.Context, n int) (int, error) {
+		return n * 2, nil
+	})
 
-	mapper := NewMapper(func(n int) int { return n })
-
-	input := make(chan int)
+	// Empty input
+	input := make(chan Result[int])
 	close(input)
 
-	output := mapper.Process(ctx, input)
+	// Process
+	ctx := context.Background()
+	results := mapper.Process(ctx, input)
 
-	count := 0
-	for range output {
+	// Verify no results
+	var count int
+	for range results {
 		count++
 	}
 
 	if count != 0 {
-		t.Errorf("expected 0 results for empty input, got %d", count)
+		t.Errorf("Expected no results from empty input, got %d", count)
 	}
 }
 
-// TestMapperContextCancellation tests graceful shutdown.
-func TestMapperContextCancellation(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+func TestMapper_WithName(t *testing.T) {
+	// Create mapper with custom name
+	mapper := NewMapper(func(_ context.Context, n int) (int, error) {
+		return n * 2, nil
+	}).WithName("test-mapper")
 
-	mapper := NewMapper(func(n int) int {
-		return n * 2
-	})
-
-	input := make(chan int)
-	output := mapper.Process(ctx, input)
-
-	// Send values continuously.
-	go func() {
-		for i := 0; ; i++ {
-			select {
-			case input <- i:
-			case <-ctx.Done():
-				close(input)
-				return
-			}
-		}
-	}()
-
-	// Collect some results.
-	resultCount := 0
-	done := make(chan bool)
-	go func() {
-		for range output {
-			resultCount++
-			if resultCount >= 5 {
-				done <- true
-				return
-			}
-		}
-		done <- true
-	}()
-
-	// Wait for some processing then cancel.
-	<-done
-	cancel()
-
-	// Verify we got some results.
-	if resultCount < 5 {
-		t.Errorf("expected at least 5 results before cancellation, got %d", resultCount)
+	// Verify name
+	if mapper.Name() != "test-mapper" {
+		t.Errorf("Expected name 'test-mapper', got '%s'", mapper.Name())
 	}
-}
 
-// TestMapperChaining tests composing multiple mappers.
-func TestMapperChaining(t *testing.T) {
-	ctx := context.Background()
-
-	// Create a chain: double -> add 10 -> to string.
-	doubler := NewMapper(func(n int) int { return n * 2 })
-	adder := NewMapper(func(n int) int { return n + 10 })
-	stringifier := NewMapper(func(n int) string { return fmt.Sprintf("result: %d", n) })
-
-	input := make(chan int, 3)
-	input <- 1  // 1 * 2 = 2, 2 + 10 = 12
-	input <- 5  // 5 * 2 = 10, 10 + 10 = 20
-	input <- 10 // 10 * 2 = 20, 20 + 10 = 30
+	// Test that errors include the custom name
+	input := make(chan Result[int], 1)
+	input <- NewSuccess(-1)
 	close(input)
 
-	// Chain the processors.
-	doubled := doubler.Process(ctx, input)
-	added := adder.Process(ctx, doubled)
-	output := stringifier.Process(ctx, added)
+	// Create mapper that returns errors to test error processor name
+	errorMapper := NewMapper(func(_ context.Context, _ int) (int, error) {
+		return 0, errors.New("test error")
+	}).WithName("error-mapper")
 
-	expected := []string{"result: 12", "result: 20", "result: 30"}
-	results := make([]string, 0, len(expected))
-	for result := range output {
-		results = append(results, result)
+	ctx := context.Background()
+	results := errorMapper.Process(ctx, input)
+
+	result := <-results
+	if !result.IsError() {
+		t.Fatal("Expected error result")
 	}
 
-	if len(results) != len(expected) {
-		t.Errorf("expected %d results, got %d", len(expected), len(results))
-	}
-
-	for i, result := range results {
-		if result != expected[i] {
-			t.Errorf("position %d: expected %s, got %s", i, expected[i], result)
-		}
+	if !strings.Contains(result.Error().Error(), "error-mapper") {
+		t.Errorf("Expected error to contain processor name 'error-mapper', got: %v", result.Error())
 	}
 }
 
-// BenchmarkMapper benchmarks mapper performance.
-func BenchmarkMapper(b *testing.B) {
-	ctx := context.Background()
-
-	mapper := NewMapper(func(n int) int {
-		return n * 2
+func TestMapper_DefaultName(t *testing.T) {
+	// Create mapper without custom name
+	mapper := NewMapper(func(_ context.Context, n int) (int, error) {
+		return n * 2, nil
 	})
 
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		input := make(chan int, 1)
-		input <- i
-		close(input)
-
-		output := mapper.Process(ctx, input)
-		<-output
+	// Verify default name
+	if mapper.Name() != "mapper" {
+		t.Errorf("Expected default name 'mapper', got '%s'", mapper.Name())
 	}
 }
 
-// BenchmarkMapperThroughput benchmarks high-throughput mapping.
-func BenchmarkMapperThroughput(b *testing.B) {
-	ctx := context.Background()
-
-	mapper := NewMapper(func(n int) int {
-		return n * 2
-	})
-
-	input := make(chan int, 1000)
-	output := mapper.Process(ctx, input)
-
-	// Consumer.
-	done := make(chan bool)
-	go func() {
-		//nolint:revive // empty-block: necessary to drain channel
-		for range output {
-			// Consume.
-		}
-		done <- true
-	}()
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	// Producer.
-	for i := 0; i < b.N; i++ {
-		input <- i
-	}
-	close(input)
-
-	<-done
-}
-
-// Example demonstrates basic mapper usage.
-func ExampleMapper() {
-	ctx := context.Background()
-
-	// Transform user data for display.
+func TestMapper_ComplexTransformation(t *testing.T) {
+	// Test a more complex transformation with struct types
 	type User struct {
-		FirstName string
-		LastName  string
-		Age       int
+		Name string
+		Age  int
 	}
 
-	type DisplayUser struct {
-		FullName string
-		Category string
+	type UserDisplay struct {
+		Display string
+		IsAdult bool
 	}
 
-	mapper := NewMapper(func(u User) DisplayUser {
-		// Combine names.
-		fullName := fmt.Sprintf("%s %s", u.FirstName, u.LastName)
-
-		// Categorize by age.
-		category := "Adult"
-		if u.Age < 18 {
-			category = "Minor"
-		} else if u.Age >= 65 {
-			category = "Senior"
+	// Create mapper for struct transformation
+	mapper := NewMapper(func(_ context.Context, u User) (UserDisplay, error) {
+		if u.Name == "" {
+			return UserDisplay{}, errors.New("name cannot be empty")
 		}
+		return UserDisplay{
+			Display: fmt.Sprintf("%s (%d)", u.Name, u.Age),
+			IsAdult: u.Age >= 18,
+		}, nil
+	})
 
-		return DisplayUser{
-			FullName: fullName,
-			Category: category,
+	// Test data
+	input := make(chan Result[User], 3)
+	input <- NewSuccess(User{Name: "Alice", Age: 25})
+	input <- NewSuccess(User{Name: "Bob", Age: 16})
+	input <- NewSuccess(User{Name: "", Age: 30}) // This will cause an error
+	close(input)
+
+	// Process
+	ctx := context.Background()
+	results := mapper.Process(ctx, input)
+
+	// Collect results
+	var successes []UserDisplay
+	var errorCount int
+	for result := range results {
+		if result.IsError() {
+			errorCount++
+		} else {
+			successes = append(successes, result.Value())
 		}
-	}).WithName("user-transformer")
-
-	// Create test users.
-	users := make(chan User, 3)
-	users <- User{FirstName: "Alice", LastName: "Smith", Age: 12}
-	users <- User{FirstName: "Bob", LastName: "Jones", Age: 35}
-	users <- User{FirstName: "Carol", LastName: "White", Age: 67}
-	close(users)
-
-	// Transform users.
-	displayUsers := mapper.Process(ctx, users)
-
-	// Print results.
-	for user := range displayUsers {
-		fmt.Printf("%s (%s)\n", user.FullName, user.Category)
 	}
 
-	// Output:
-	// Alice Smith (Minor)
-	// Bob Jones (Adult)
-	// Carol White (Senior)
+	// Verify
+	if len(successes) != 2 {
+		t.Fatalf("Expected 2 successes, got %d", len(successes))
+	}
+	if errorCount != 1 {
+		t.Fatalf("Expected 1 error, got %d", errorCount)
+	}
+
+	// Verify specific transformations
+	if successes[0].Display != "Alice (25)" || !successes[0].IsAdult {
+		t.Errorf("Unexpected first result: %+v", successes[0])
+	}
+	if successes[1].Display != "Bob (16)" || successes[1].IsAdult {
+		t.Errorf("Unexpected second result: %+v", successes[1])
+	}
+}
+
+// Benchmark to ensure the mapper has minimal overhead.
+func BenchmarkMapper(b *testing.B) {
+	mapper := NewMapper(func(_ context.Context, n int) (int, error) {
+		return n * 2, nil
+	})
+
+	ctx := context.Background()
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			input := make(chan Result[int], 1)
+			input <- NewSuccess(42)
+			close(input)
+
+			results := mapper.Process(ctx, input)
+			result := <-results
+
+			if result.IsError() || result.Value() != 84 {
+				b.Fatal("Unexpected result")
+			}
+		}
+	})
 }

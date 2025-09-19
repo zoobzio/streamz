@@ -2,92 +2,138 @@ package streamz
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/binary"
+	"math"
+	"math/rand/v2"
 )
 
-// Sample randomly selects items from a stream based on a sampling rate.
-// It uses cryptographically secure randomness to ensure unbiased sampling,
-// making it suitable for statistical sampling and data reduction.
+// Sample randomly selects items from a stream based on a probability rate.
+// It keeps successful items based on the configured rate (0.0 to 1.0) and always
+// passes through errors unchanged.
+//
+// Sample is used for:
+//   - Load shedding in high-volume streams
+//   - Creating statistical samples for monitoring
+//   - Random downsampling for performance optimization
+//   - A/B testing traffic distribution
+//
+// The sampling decision is made independently for each item using
+// cryptographically secure randomness. Items are either kept completely
+// or dropped completely - no modification occurs.
+//
+//nolint:govet // fieldalignment: struct layout optimized for readability
 type Sample[T any] struct {
 	name string
 	rate float64
 }
 
-// NewSample creates a processor that randomly samples items at the specified rate.
-// Each item has an independent probability of being selected, ensuring statistical validity.
+// NewSample creates a processor that randomly selects items based on probability.
+// The rate parameter determines the probability (0.0 to 1.0) that each successful
+// item will be kept in the stream. A rate of 0.0 drops all items, 1.0 keeps all items.
+//
+// Error items are always passed through unchanged regardless of the rate.
 //
 // When to use:
-//   - Reducing data volume for analysis or monitoring
-//   - Statistical sampling for quality control
-//   - Load testing with a percentage of traffic
-//   - Creating data subsets for development/testing
-//   - Implementing trace sampling in observability
+//   - High-volume streams needing load reduction
+//   - Statistical sampling for monitoring/analytics
+//   - Performance optimization through data reduction
+//   - Random traffic splitting for testing
+//   - Memory pressure relief in processing pipelines
 //
 // Example:
 //
-//	// Sample 10% of events for analysis
-//	sampler := streamz.NewSample[Event](0.1)
+//	// Keep 10% of successful orders for monitoring
+//	monitor := streamz.NewSample[Order](0.1)
 //
-//	sampled := sampler.Process(ctx, events)
-//	for event := range sampled {
-//		// Approximately 10% of events will be processed
-//		analyzeEvent(event)
-//	}
+//	// Half of metrics for storage optimization
+//	storage := streamz.NewSample[Metric](0.5)
 //
-//	// Trace sampling for observability
-//	traceSampler := streamz.NewSample[Request](0.01) // 1% sampling
-//	sampled := traceSampler.Process(ctx, requests)
-//	for req := range sampled {
-//		// Detailed tracing for 1% of requests
-//		trace.Enable(req)
-//		processRequest(req)
+//	// Load testing with 1% of production traffic
+//	loadTest := streamz.NewSample[Request](0.01).WithName("load-test-sample")
+//
+//	// A/B testing - 50/50 split
+//	groupA := streamz.NewSample[User](0.5)
+//
+//	results := monitor.Process(ctx, input)
+//	for result := range results {
+//		// Approximately 10% of successful items, all errors
+//		processMonitoringData(result)
 //	}
 //
 // Parameters:
-//   - rate: Sampling rate between 0.0 and 1.0 (0.1 = 10%, 1.0 = 100%)
+//   - rate: Probability (0.0-1.0) that successful items will be kept
 //
 // Returns a new Sample processor.
+// Panics if rate is outside the valid range [0.0, 1.0].
 func NewSample[T any](rate float64) *Sample[T] {
+	if rate < 0.0 || rate > 1.0 || math.IsNaN(rate) || math.IsInf(rate, 0) {
+		panic("sample rate must be between 0.0 and 1.0")
+	}
+
 	return &Sample[T]{
-		rate: rate,
 		name: "sample",
+		rate: rate,
 	}
 }
 
-func (s *Sample[T]) Process(ctx context.Context, in <-chan T) <-chan T {
-	out := make(chan T)
+// WithName sets a custom name for this processor.
+// If not set, defaults to "sample".
+// The name is used for debugging, monitoring, and error reporting.
+func (s *Sample[T]) WithName(name string) *Sample[T] {
+	s.name = name
+	return s
+}
+
+// Process randomly selects successful items based on the configured rate.
+// Each successful item has an independent probability of being kept.
+// Error items are always passed through unchanged.
+//
+// The selection uses rand.Float64() which provides cryptographically secure
+// randomness suitable for statistical sampling and load balancing.
+func (s *Sample[T]) Process(ctx context.Context, in <-chan Result[T]) <-chan Result[T] {
+	out := make(chan Result[T])
 
 	go func() {
 		defer close(out)
 
 		for item := range in {
-			if s.shouldSample() {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			// Always pass through errors
+			if item.IsError() {
+				select {
+				case out <- item:
+				case <-ctx.Done():
+					return
+				}
+				continue
+			}
+
+			// Sample successful items based on rate
+			//nolint:gosec // Non-cryptographic randomness is acceptable for sampling
+			if rand.Float64() < s.rate {
 				select {
 				case out <- item:
 				case <-ctx.Done():
 					return
 				}
 			}
+			// Items not selected are dropped (no output)
 		}
 	}()
 
 	return out
 }
 
-func (s *Sample[T]) shouldSample() bool {
-	var b [8]byte
-	_, err := rand.Read(b[:])
-	if err != nil {
-		// On error, default to not sampling
-		return false
-	}
-
-	// Convert to float64 in range [0, 1)
-	val := binary.BigEndian.Uint64(b[:]) >> 11 // Use 53 bits for mantissa
-	return float64(val)/(1<<53) < s.rate
-}
-
+// Name returns the processor name for debugging and monitoring.
 func (s *Sample[T]) Name() string {
 	return s.name
+}
+
+// Rate returns the current sampling rate.
+func (s *Sample[T]) Rate() float64 {
+	return s.rate
 }

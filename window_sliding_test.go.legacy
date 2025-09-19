@@ -1,0 +1,630 @@
+package streamz
+
+import (
+	"github.com/zoobzio/clockz"
+	"context"
+	"fmt"
+	"sync"
+	"testing"
+	"time"
+)
+
+func TestSlidingWindow_BasicTumblingBehavior(t *testing.T) {
+	ctx := context.Background()
+	in := make(chan Result[int])
+
+	clock := clockz.NewFakeClockAt(time.Date(2023, 1, 1, 12, 0, 0, 0, time.UTC))
+	// Default behavior: slide = size (tumbling)
+	window := NewSlidingWindow[int](100*time.Millisecond, clock)
+	out := window.Process(ctx, in)
+
+	var windows []Window[int]
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for w := range out {
+			windows = append(windows, w)
+		}
+	}()
+
+	go func() {
+		defer close(in)
+
+		// Send items in first window
+		in <- NewSuccess(1)
+		clock.Advance(50 * time.Millisecond)
+		clock.BlockUntilReady() // Ensure timer fires
+		in <- NewSuccess(2)
+		clock.Advance(50 * time.Millisecond) // Complete first window
+		clock.BlockUntilReady() // Wait for window to close and emit
+
+		// Send items in second window
+		in <- NewSuccess(3)
+		clock.Advance(50 * time.Millisecond)
+		clock.BlockUntilReady() // Ensure timer fires
+		in <- NewSuccess(4)
+		clock.Advance(50 * time.Millisecond) // Complete second window
+		clock.BlockUntilReady() // Wait for window to close and emit
+	}()
+
+	wg.Wait()
+
+	if len(windows) != 2 {
+		t.Fatalf("expected 2 windows (tumbling behavior), got %d", len(windows))
+	}
+
+	// First window should have items 1, 2
+	w1 := windows[0]
+	values1 := w1.Values()
+	if len(values1) != 2 || values1[0] != 1 || values1[1] != 2 {
+		t.Errorf("first window: expected [1, 2], got %v", values1)
+	}
+
+	// Second window should have items 3, 4
+	w2 := windows[1]
+	values2 := w2.Values()
+	if len(values2) != 2 || values2[0] != 3 || values2[1] != 4 {
+		t.Errorf("second window: expected [3, 4], got %v", values2)
+	}
+}
+
+func TestSlidingWindow_OverlappingWindows(t *testing.T) {
+	ctx := context.Background()
+	in := make(chan Result[int])
+
+	clock := clockz.NewFakeClockAt(time.Date(2023, 1, 1, 12, 0, 0, 0, time.UTC))
+	// 100ms window, 50ms slide = 50ms overlap
+	window := NewSlidingWindow[int](100*time.Millisecond, clock).
+		WithSlide(50 * time.Millisecond)
+	out := window.Process(ctx, in)
+
+	var windows []Window[int]
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for w := range out {
+			windows = append(windows, w)
+		}
+	}()
+
+	go func() {
+		defer close(in)
+
+		// t=0: item 1 (belongs to windows starting at t=0)
+		in <- NewSuccess(1)
+		time.Sleep(10 * time.Millisecond) // Let it process
+
+		// t=25: item 2
+		clock.Advance(25 * time.Millisecond)
+		in <- NewSuccess(2)
+		time.Sleep(10 * time.Millisecond) // Let it process
+
+		// t=50: item 3 (new window starts here)
+		clock.Advance(25 * time.Millisecond)
+		in <- NewSuccess(3)
+		time.Sleep(10 * time.Millisecond) // Let it process
+
+		// t=75: item 4
+		clock.Advance(25 * time.Millisecond)
+		in <- NewSuccess(4)
+		time.Sleep(10 * time.Millisecond) // Let it process
+
+		// t=100: first window expires, second window continues
+		clock.Advance(25 * time.Millisecond)
+		clock.BlockUntilReady()
+
+		// t=125: item 5
+		clock.Advance(25 * time.Millisecond)
+		in <- NewSuccess(5)
+		time.Sleep(10 * time.Millisecond) // Let it process
+
+		// t=150: second window expires
+		clock.Advance(25 * time.Millisecond)
+		clock.BlockUntilReady()
+	}()
+
+	wg.Wait()
+
+	if len(windows) != 3 {
+		t.Fatalf("expected 3 overlapping windows, got %d", len(windows))
+	}
+
+	// First window (t=0 to t=100): items 1, 2, 3, 4 (item 4 at t=75ms is within [0-100ms])
+	w1 := windows[0]
+	values1 := w1.Values()
+	expected1 := []int{1, 2, 3, 4}
+	if len(values1) != len(expected1) {
+		t.Fatalf("first window: expected %d items, got %d", len(expected1), len(values1))
+	}
+	for i, expected := range expected1 {
+		if values1[i] != expected {
+			t.Errorf("first window[%d]: expected %d, got %d", i, expected, values1[i])
+		}
+	}
+
+	// Second window (t=50 to t=150): items 3, 4, 5 (item 5 at t=125ms is within [50-150ms])
+	w2 := windows[1]
+	values2 := w2.Values()
+	expected2 := []int{3, 4, 5}
+	if len(values2) != len(expected2) {
+		t.Fatalf("second window: expected %d items %v, got %d items %v", len(expected2), expected2, len(values2), values2)
+	}
+	for i, expected := range expected2 {
+		if values2[i] != expected {
+			t.Errorf("second window[%d]: expected %d, got %d", i, expected, values2[i])
+		}
+	}
+
+	// Third window (t=100 to t=200): item 5
+	w3 := windows[2]
+	values3 := w3.Values()
+	expected3 := []int{5}
+	if len(values3) != len(expected3) {
+		t.Fatalf("third window: expected %d items, got %d", len(expected3), len(values3))
+	}
+	for i, expected := range expected3 {
+		if values3[i] != expected {
+			t.Errorf("third window[%d]: expected %d, got %d", i, expected, values3[i])
+		}
+	}
+}
+
+func TestSlidingWindow_WithErrors(t *testing.T) {
+	ctx := context.Background()
+	in := make(chan Result[int])
+
+	clock := clockz.NewFakeClockAt(time.Date(2023, 1, 1, 12, 0, 0, 0, time.UTC))
+	window := NewSlidingWindow[int](100*time.Millisecond, clock).
+		WithSlide(50 * time.Millisecond).
+		WithName("test-sliding")
+	out := window.Process(ctx, in)
+
+	var windows []Window[int]
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for w := range out {
+			windows = append(windows, w)
+		}
+	}()
+
+	go func() {
+		defer close(in)
+
+		// Mix of success and errors
+		in <- NewSuccess(1)
+		time.Sleep(10 * time.Millisecond) // Let it process
+		clock.Advance(25 * time.Millisecond)
+		in <- NewError(2, fmt.Errorf("error 2"), "test")
+		time.Sleep(10 * time.Millisecond) // Let it process
+		clock.Advance(25 * time.Millisecond)
+		in <- NewSuccess(3)
+		time.Sleep(10 * time.Millisecond) // Let it process
+		clock.Advance(25 * time.Millisecond)
+		in <- NewError(4, fmt.Errorf("error 4"), "test")
+		time.Sleep(10 * time.Millisecond) // Let it process
+
+		// t=100: first window expires
+		clock.Advance(25 * time.Millisecond)
+		clock.BlockUntilReady()
+
+		in <- NewSuccess(5)
+		time.Sleep(10 * time.Millisecond) // Let it process
+
+		// t=150: second window expires
+		clock.Advance(50 * time.Millisecond)
+		clock.BlockUntilReady()
+	}()
+
+	wg.Wait()
+
+	if len(windows) != 3 {
+		t.Fatalf("expected 3 windows, got %d", len(windows))
+	}
+
+	// First window (t=0 to t=100): 1 (success), 2 (error), 3 (success), 4 (error)
+	w1 := windows[0]
+	if w1.Count() != 4 {
+		t.Errorf("first window: expected 4 total results, got %d", w1.Count())
+	}
+	if w1.SuccessCount() != 2 {
+		t.Errorf("first window: expected 2 successes, got %d", w1.SuccessCount())
+	}
+	if w1.ErrorCount() != 2 {
+		t.Errorf("first window: expected 2 errors, got %d", w1.ErrorCount())
+	}
+
+	values1 := w1.Values()
+	if len(values1) != 2 || values1[0] != 1 || values1[1] != 3 {
+		t.Errorf("first window values: expected [1, 3], got %v", values1)
+	}
+
+	errors1 := w1.Errors()
+	if len(errors1) != 2 || errors1[0].Item != 2 || errors1[1].Item != 4 {
+		t.Errorf("first window errors: expected items [2, 4], got %v", func() []int {
+			var items []int
+			for _, e := range errors1 {
+				items = append(items, e.Item)
+			}
+			return items
+		}())
+	}
+
+	// Second window (t=50 to t=150): 3 (success), 4 (error), 5 (success)
+	w2 := windows[1]
+	if w2.Count() != 3 {
+		t.Errorf("second window: expected 3 total results, got %d", w2.Count())
+	}
+	if w2.SuccessCount() != 2 {
+		t.Errorf("second window: expected 2 successes, got %d", w2.SuccessCount())
+	}
+	if w2.ErrorCount() != 1 {
+		t.Errorf("second window: expected 1 error, got %d", w2.ErrorCount())
+	}
+
+	values2 := w2.Values()
+	if len(values2) != 2 || values2[0] != 3 || values2[1] != 5 {
+		t.Errorf("second window values: expected [3, 5], got %v", values2)
+	}
+
+	errors2 := w2.Errors()
+	if len(errors2) != 1 || errors2[0].Item != 4 {
+		t.Errorf("second window errors: expected items [4], got %v", func() []int {
+			var items []int
+			for _, e := range errors2 {
+				items = append(items, e.Item)
+			}
+			return items
+		}())
+	}
+
+	// Third window (t=100 to t=200): 5 (success)
+	w3 := windows[2]
+	if w3.Count() != 1 {
+		t.Errorf("third window: expected 1 total result, got %d", w3.Count())
+	}
+	if w3.SuccessCount() != 1 {
+		t.Errorf("third window: expected 1 success, got %d", w3.SuccessCount())
+	}
+	if w3.ErrorCount() != 0 {
+		t.Errorf("third window: expected 0 errors, got %d", w3.ErrorCount())
+	}
+
+	values3 := w3.Values()
+	if len(values3) != 1 || values3[0] != 5 {
+		t.Errorf("third window values: expected [5], got %v", values3)
+	}
+}
+
+func TestSlidingWindow_EmptyWindows(t *testing.T) {
+	ctx := context.Background()
+	in := make(chan Result[int])
+
+	clock := clockz.NewFakeClockAt(time.Date(2023, 1, 1, 12, 0, 0, 0, time.UTC))
+	window := NewSlidingWindow[int](100*time.Millisecond, clock).
+		WithSlide(50 * time.Millisecond)
+	out := window.Process(ctx, in)
+
+	var windows []Window[int]
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for w := range out {
+			windows = append(windows, w)
+		}
+	}()
+
+	go func() {
+		defer close(in)
+
+		// Send item, then let empty windows pass
+		in <- NewSuccess(1)
+
+		// Advance past several window boundaries with no new data
+		clock.Advance(300 * time.Millisecond) // Multiple empty windows would occur here
+		clock.BlockUntilReady()
+
+		// Send another item later
+		in <- NewSuccess(2)
+		clock.Advance(150 * time.Millisecond)
+		clock.BlockUntilReady()
+	}()
+
+	wg.Wait()
+
+	// Should only emit windows with data
+	if len(windows) == 0 {
+		t.Fatal("expected at least 1 window with data")
+	}
+
+	// Verify that only non-empty windows were emitted
+	for i, w := range windows {
+		if w.Count() == 0 {
+			t.Errorf("window %d: empty windows should not be emitted", i)
+		}
+	}
+}
+
+func TestSlidingWindow_ContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	in := make(chan Result[int])
+
+	clock := clockz.NewFakeClockAt(time.Date(2023, 1, 1, 12, 0, 0, 0, time.UTC))
+	// Use shorter window/slide for faster test and more predictable behavior
+	window := NewSlidingWindow[int](200*time.Millisecond, clock).
+		WithSlide(100 * time.Millisecond)
+	out := window.Process(ctx, in)
+
+	var windows []Window[int]
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for w := range out {
+			windows = append(windows, w)
+		}
+	}()
+
+	// Simplified approach: Process items with proper timing, then cancel
+	go func() {
+		defer close(in) // Essential - close the channel!
+
+		// Send item 1 and let it be processed
+		in <- NewSuccess(1)
+		clock.BlockUntilReady() // Wait for clock operations
+
+		// Move clock forward and send item 2
+		clock.Advance(150 * time.Millisecond)
+		clock.BlockUntilReady() // Wait for timers to fire
+		in <- NewSuccess(2)
+		clock.BlockUntilReady() // Wait for processing
+
+		// Move clock forward and send item 3
+		clock.Advance(150 * time.Millisecond)
+		clock.BlockUntilReady() // Wait for timers to fire
+		in <- NewSuccess(3)
+		clock.BlockUntilReady() // Wait for processing
+
+		// Advance to trigger slide boundaries and window creation
+		clock.Advance(100 * time.Millisecond) // Should trigger slide at 100ms
+		clock.BlockUntilReady()               // Wait for timers to fire
+		
+		clock.Advance(100 * time.Millisecond) // Should trigger slide at 200ms  
+		clock.BlockUntilReady()               // Wait for timers to fire
+
+		// Cancel context to emit accumulated windows
+		cancel()
+	}()
+
+	wg.Wait()
+
+	// Should emit all accumulated windows on cancellation
+	totalItems := 0
+	for _, w := range windows {
+		totalItems += w.Count()
+	}
+
+	// All 3 items should be accounted for in some window(s)
+	if totalItems < 3 {
+		t.Errorf("expected at least 3 total items across windows, got %d", totalItems)
+	}
+}
+
+func TestSlidingWindow_WindowTimeBoundaries(t *testing.T) {
+	ctx := context.Background()
+	in := make(chan Result[int])
+
+	baseTime := time.Date(2023, 1, 1, 12, 0, 0, 0, time.UTC)
+	clock := clockz.NewFakeClockAt(baseTime)
+	window := NewSlidingWindow[int](100*time.Millisecond, clock).
+		WithSlide(50 * time.Millisecond)
+	out := window.Process(ctx, in)
+
+	var windows []Window[int]
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for w := range out {
+			windows = append(windows, w)
+		}
+	}()
+
+	go func() {
+		defer close(in)
+
+		in <- NewSuccess(1)
+		clock.Advance(100 * time.Millisecond) // First window expires
+		clock.BlockUntilReady()
+	}()
+
+	wg.Wait()
+
+	if len(windows) != 1 {
+		t.Fatalf("expected 1 window, got %d", len(windows))
+	}
+
+	w := windows[0]
+
+	// The window should start at the slide boundary for when the item arrived
+	// With 50ms slide, baseTime (12:00:00.000) truncated to 50ms boundaries = 12:00:00.000
+	expectedStart := baseTime.Truncate(50 * time.Millisecond)
+	expectedEnd := expectedStart.Add(100 * time.Millisecond)
+
+	if !w.Start.Equal(expectedStart) {
+		t.Errorf("window start: expected %v, got %v", expectedStart, w.Start)
+	}
+	if !w.End.Equal(expectedEnd) {
+		t.Errorf("window end: expected %v, got %v", expectedEnd, w.End)
+	}
+}
+
+func TestSlidingWindow_Name(t *testing.T) {
+	clock := clockz.NewFakeClock()
+	window := NewSlidingWindow[int](time.Second, clock)
+
+	if window.Name() != "sliding-window" {
+		t.Errorf("default name: expected 'sliding-window', got '%s'", window.Name())
+	}
+
+	window = window.WithName("custom-sliding")
+	if window.Name() != "custom-sliding" {
+		t.Errorf("custom name: expected 'custom-sliding', got '%s'", window.Name())
+	}
+}
+
+func TestSlidingWindow_FluentAPI(t *testing.T) {
+	clock := clockz.NewFakeClock()
+
+	// Test method chaining
+	window := NewSlidingWindow[string](time.Minute, clock).
+		WithSlide(30 * time.Second).
+		WithName("chained-window")
+
+	if window.Name() != "chained-window" {
+		t.Errorf("expected 'chained-window', got '%s'", window.Name())
+	}
+	if window.slide != 30*time.Second {
+		t.Errorf("expected 30s slide, got %v", window.slide)
+	}
+	if window.size != time.Minute {
+		t.Errorf("expected 1m size, got %v", window.size)
+	}
+}
+
+func TestSlidingWindow_MultipleOverlappingItems(t *testing.T) {
+	ctx := context.Background()
+	in := make(chan Result[int])
+
+	clock := clockz.NewFakeClockAt(time.Date(2023, 1, 1, 12, 0, 0, 0, time.UTC))
+	// 150ms window, 50ms slide = heavy overlap
+	window := NewSlidingWindow[int](150*time.Millisecond, clock).
+		WithSlide(50 * time.Millisecond)
+	out := window.Process(ctx, in)
+
+	var windows []Window[int]
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for w := range out {
+			windows = append(windows, w)
+		}
+	}()
+
+	go func() {
+		defer close(in)
+
+		// Send items every 50ms
+		for i := 1; i <= 4; i++ {
+			in <- NewSuccess(i)
+			clock.Advance(50 * time.Millisecond)
+		}
+
+		// Let all windows expire
+		clock.Advance(150 * time.Millisecond)
+		clock.BlockUntilReady()
+	}()
+
+	wg.Wait()
+
+	// Should have multiple overlapping windows
+	// Window 1 (0-150ms): items 1, 2, 3
+	// Window 2 (50-200ms): items 2, 3, 4
+	// Window 3 (100-250ms): items 3, 4
+	// Window 4 (150-300ms): item 4
+
+	if len(windows) < 3 {
+		t.Fatalf("expected at least 3 overlapping windows, got %d", len(windows))
+	}
+
+	// Verify items appear in multiple windows (overlapping behavior)
+	itemAppearances := make(map[int]int)
+	for _, window := range windows {
+		for _, value := range window.Values() {
+			itemAppearances[value]++
+		}
+	}
+
+	// Items should appear in multiple windows due to overlap
+	for item, count := range itemAppearances {
+		if count == 0 {
+			t.Errorf("item %d should appear in at least 1 window", item)
+		}
+	}
+}
+
+func TestSlidingWindow_RealClock_Integration(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	in := make(chan Result[string])
+	// 100ms window, 50ms slide
+	window := NewSlidingWindow[string](100*time.Millisecond, RealClock).
+		WithSlide(50 * time.Millisecond)
+	out := window.Process(ctx, in)
+
+	var windows []Window[string]
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for w := range out {
+			windows = append(windows, w)
+		}
+	}()
+
+	go func() {
+		defer close(in)
+
+		// Send items with real timing
+		for i := 0; i < 6; i++ {
+			in <- NewSuccess(fmt.Sprintf("item-%d", i))
+			time.Sleep(30 * time.Millisecond) // Faster than slide interval
+		}
+		// Let windows expire
+		time.Sleep(150 * time.Millisecond)
+	}()
+
+	wg.Wait()
+
+	// Should get overlapping windows with real timing
+	if len(windows) < 2 {
+		t.Errorf("expected at least 2 overlapping windows with real timing, got %d", len(windows))
+	}
+
+	// Verify overlapping behavior - some items should appear in multiple windows
+	allItems := make(map[string]int)
+	for _, w := range windows {
+		for _, item := range w.Values() {
+			allItems[item]++
+		}
+	}
+
+	overlappingItems := 0
+	for _, count := range allItems {
+		if count > 1 {
+			overlappingItems++
+		}
+	}
+
+	if overlappingItems == 0 {
+		t.Error("expected some items to appear in multiple overlapping windows")
+	}
+}

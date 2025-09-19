@@ -8,333 +8,465 @@ import (
 	"time"
 )
 
-// TestFanOutBasic tests basic fan-out functionality.
-func TestFanOutBasic(t *testing.T) {
-	ctx := context.Background()
+// collectResults collects all results from a channel within a timeout.
+func collectResults[T any](ch <-chan Result[T], timeout time.Duration) []Result[T] {
+	var results []Result[T]
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 
-	// Create input channel.
-	input := make(chan int, 5)
-	for i := 1; i <= 5; i++ {
-		input <- i
+	for {
+		select {
+		case result, ok := <-ch:
+			if !ok {
+				return results
+			}
+			results = append(results, result)
+		case <-timer.C:
+			return results
+		}
 	}
+}
+
+func TestFanOut_BroadcastSuccess(t *testing.T) {
+	ctx := context.Background()
+	fanout := NewFanOut[int](3)
+
+	// Create input with successful values
+	input := make(chan Result[int], 5)
+	input <- NewSuccess(1)
+	input <- NewSuccess(2)
+	input <- NewSuccess(3)
 	close(input)
 
-	// Create fan-out with 3 outputs.
-	fanout := NewFanOut[int](3)
 	outputs := fanout.Process(ctx, input)
 
 	if len(outputs) != 3 {
-		t.Fatalf("expected 3 output channels, got %d", len(outputs))
+		t.Errorf("expected 3 outputs, got %d", len(outputs))
+		return
 	}
 
-	// Collect from all outputs.
+	// Collect from all outputs concurrently
 	var wg sync.WaitGroup
-	results := make([][]int, 3)
+	results := make([][]Result[int], 3)
 
-	for i, out := range outputs {
+	for i := 0; i < 3; i++ {
 		wg.Add(1)
-		go func(idx int, ch <-chan int) {
+		go func(index int) {
 			defer wg.Done()
-			for val := range ch {
-				results[idx] = append(results[idx], val)
-			}
-		}(i, out)
+			results[index] = collectResults(outputs[index], 100*time.Millisecond)
+		}(i)
 	}
-
 	wg.Wait()
 
-	// Each output should have all values.
-	for i, result := range results {
-		if len(result) != 5 {
-			t.Errorf("output %d: expected 5 values, got %d", i, len(result))
+	// Verify each output received all values
+	expected := []int{1, 2, 3}
+	for i := 0; i < 3; i++ {
+		if len(results[i]) != len(expected) {
+			t.Errorf("output %d: expected %d results, got %d", i, len(expected), len(results[i]))
+			continue
 		}
-		for j, val := range result {
-			if val != j+1 {
-				t.Errorf("output %d, position %d: expected %d, got %d", i, j, j+1, val)
+
+		for j, result := range results[i] {
+			if result.IsError() {
+				t.Errorf("output %d, item %d: expected success, got error: %v", i, j, result.Error())
+				continue
+			}
+			if result.Value() != expected[j] {
+				t.Errorf("output %d, item %d: expected %d, got %d", i, j, expected[j], result.Value())
 			}
 		}
 	}
-
-	// FanOut processor created successfully.
 }
 
-// TestFanOutConcurrentConsumers tests concurrent consumption.
-func TestFanOutConcurrentConsumers(t *testing.T) {
+func TestFanOut_BroadcastErrors(t *testing.T) {
 	ctx := context.Background()
+	fanout := NewFanOut[int](2)
 
-	input := make(chan string)
-	fanout := NewFanOut[string](3)
+	// Create input with error
+	input := make(chan Result[int], 3)
+	input <- NewError(1, fmt.Errorf("processing failed"), "test")
+	input <- NewSuccess(2)
+	input <- NewError(3, fmt.Errorf("another failure"), "test")
+	close(input)
+
 	outputs := fanout.Process(ctx, input)
 
-	// Start consumers with different processing speeds.
+	// Collect from all outputs
 	var wg sync.WaitGroup
-	counts := make([]int, 3)
+	results := make([][]Result[int], 2)
+
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			results[index] = collectResults(outputs[index], 100*time.Millisecond)
+		}(i)
+	}
+	wg.Wait()
+
+	// Verify both outputs received all items (including errors)
+	for i := 0; i < 2; i++ {
+		if len(results[i]) != 3 {
+			t.Errorf("output %d: expected 3 results, got %d", i, len(results[i]))
+			continue
+		}
+
+		// First result should be an error
+		if !results[i][0].IsError() {
+			t.Errorf("output %d, item 0: expected error, got success: %v", i, results[i][0].Value())
+		} else if results[i][0].Error().Item != 1 {
+			t.Errorf("output %d, item 0: expected error item 1, got %v", i, results[i][0].Error().Item)
+		}
+
+		// Second result should be success
+		if results[i][1].IsError() {
+			t.Errorf("output %d, item 1: expected success, got error: %v", i, results[i][1].Error())
+		} else if results[i][1].Value() != 2 {
+			t.Errorf("output %d, item 1: expected 2, got %d", i, results[i][1].Value())
+		}
+
+		// Third result should be an error
+		if !results[i][2].IsError() {
+			t.Errorf("output %d, item 2: expected error, got success: %v", i, results[i][2].Value())
+		} else if results[i][2].Error().Item != 3 {
+			t.Errorf("output %d, item 2: expected error item 3, got %v", i, results[i][2].Error().Item)
+		}
+	}
+}
+
+func TestFanOut_MixedSuccessError(t *testing.T) {
+	ctx := context.Background()
+	fanout := NewFanOut[string](3)
+
+	// Create input with mixed success/error
+	input := make(chan Result[string], 4)
+	input <- NewSuccess("hello")
+	input <- NewError("bad", fmt.Errorf("bad data"), "validator")
+	input <- NewSuccess("world")
+	input <- NewError("invalid", fmt.Errorf("validation failed"), "validator")
+	close(input)
+
+	outputs := fanout.Process(ctx, input)
+
+	// Collect from all outputs
+	var wg sync.WaitGroup
+	results := make([][]Result[string], 3)
+
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			results[index] = collectResults(outputs[index], 100*time.Millisecond)
+		}(i)
+	}
+	wg.Wait()
+
+	// All outputs should receive the same sequence
+	for i := 0; i < 3; i++ {
+		if len(results[i]) != 4 {
+			t.Errorf("output %d: expected 4 results, got %d", i, len(results[i]))
+			continue
+		}
+
+		// Verify sequence: success, error, success, error
+		expected := []struct {
+			isError bool
+			value   string
+			item    string
+		}{
+			{false, "hello", ""},
+			{true, "", "bad"},
+			{false, "world", ""},
+			{true, "", "invalid"},
+		}
+
+		for j, exp := range expected {
+			result := results[i][j]
+			if exp.isError {
+				if !result.IsError() {
+					t.Errorf("output %d, item %d: expected error, got success: %v", i, j, result.Value())
+				} else if result.Error().Item != exp.item {
+					t.Errorf("output %d, item %d: expected error item %q, got %q", i, j, exp.item, result.Error().Item)
+				}
+			} else {
+				if result.IsError() {
+					t.Errorf("output %d, item %d: expected success, got error: %v", i, j, result.Error())
+				} else if result.Value() != exp.value {
+					t.Errorf("output %d, item %d: expected %q, got %q", i, j, exp.value, result.Value())
+				}
+			}
+		}
+	}
+}
+
+func TestFanOut_ContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	fanout := NewFanOut[int](2)
+
+	// Create input that would send many items
+	input := make(chan Result[int])
+
+	outputs := fanout.Process(ctx, input)
+
+	// Send one item, then cancel
+	input <- NewSuccess(1)
+	cancel()
+
+	// Give it time to process cancellation
+	time.Sleep(50 * time.Millisecond)
+
+	// Try to send more (should not block due to cancellation)
+	select {
+	case input <- NewSuccess(2):
+		// This might succeed if the goroutine hasn't processed cancellation yet
+	case <-time.After(10 * time.Millisecond):
+		// Expected - the goroutine should exit and stop consuming
+	}
+	close(input)
+
+	// Outputs should be closed
+	var wg sync.WaitGroup
+	closedCount := 0
 	var mu sync.Mutex
 
-	for i, out := range outputs {
+	for i := 0; i < 2; i++ {
 		wg.Add(1)
-		go func(idx int, ch <-chan string) {
+		go func(index int) {
 			defer wg.Done()
-			for range ch {
-				// Simulate different processing speeds.
-				time.Sleep(time.Duration(idx*5) * time.Millisecond)
-				mu.Lock()
-				counts[idx]++
-				mu.Unlock()
+			//nolint:revive // empty-block: intentional channel draining
+			for range outputs[index] {
+				// Drain any remaining items
 			}
-		}(i, out)
+			mu.Lock()
+			closedCount++
+			mu.Unlock()
+		}(i)
 	}
-
-	// Send data.
-	go func() {
-		for i := 0; i < 10; i++ {
-			input <- fmt.Sprintf("msg-%d", i)
-		}
-		close(input)
-	}()
 
 	wg.Wait()
 
-	// All consumers should receive all messages.
-	mu.Lock()
-	defer mu.Unlock()
-	for i, count := range counts {
-		if count != 10 {
-			t.Errorf("consumer %d: expected 10 messages, got %d", i, count)
-		}
+	if closedCount != 2 {
+		t.Errorf("expected 2 outputs to be closed, got %d", closedCount)
 	}
 }
 
-// TestFanOutEmptyInput tests fan-out with empty input.
-func TestFanOutEmptyInput(t *testing.T) {
+func TestFanOut_SlowConsumer(t *testing.T) {
 	ctx := context.Background()
+	fanout := NewFanOut[int](2)
 
-	input := make(chan int)
+	// Create input
+	input := make(chan Result[int], 3)
+	input <- NewSuccess(1)
+	input <- NewSuccess(2)
+	input <- NewSuccess(3)
 	close(input)
 
-	fanout := NewFanOut[int](2)
 	outputs := fanout.Process(ctx, input)
 
-	for i, out := range outputs {
-		count := 0
-		for range out {
-			count++
+	// Use WaitGroup and channels to properly synchronize
+	var wg sync.WaitGroup
+	fastResults := make(chan []Result[int], 1)
+	slowResults := make(chan []Result[int], 1)
+
+	// Consume from first output normally
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		var results []Result[int]
+		for result := range outputs[0] {
+			results = append(results, result)
 		}
-		if count != 0 {
-			t.Errorf("output %d: expected 0 values, got %d", i, count)
+		fastResults <- results
+	}()
+
+	// Consume from second output slowly
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		var results []Result[int]
+		for result := range outputs[1] {
+			results = append(results, result)
+			time.Sleep(50 * time.Millisecond) // Slow consumer
+		}
+		slowResults <- results
+	}()
+
+	// Wait for both to complete
+	wg.Wait()
+
+	// Get the results safely
+	fastResultList := <-fastResults
+	slowResultList := <-slowResults
+
+	// Both should have received all items (FanOut waits for all outputs)
+	if len(fastResultList) != 3 {
+		t.Errorf("fast consumer: expected 3 results, got %d", len(fastResultList))
+	}
+	if len(slowResultList) != 3 {
+		t.Errorf("slow consumer: expected 3 results, got %d", len(slowResultList))
+	}
+
+	// Verify values
+	for i, result := range fastResultList {
+		if result.IsError() || result.Value() != i+1 {
+			t.Errorf("fast consumer item %d: expected %d, got %v", i, i+1, result)
+		}
+	}
+	for i, result := range slowResultList {
+		if result.IsError() || result.Value() != i+1 {
+			t.Errorf("slow consumer item %d: expected %d, got %v", i, i+1, result)
 		}
 	}
 }
 
-// TestFanOutSingleOutput tests fan-out with n=1.
-func TestFanOutSingleOutput(t *testing.T) {
+func TestFanOut_SingleOutput(t *testing.T) {
 	ctx := context.Background()
+	fanout := NewFanOut[int](1)
 
-	input := make(chan int, 3)
-	input <- 1
-	input <- 2
-	input <- 3
+	input := make(chan Result[int], 2)
+	input <- NewSuccess(42)
+	input <- NewError(99, fmt.Errorf("test error"), "test")
 	close(input)
 
-	fanout := NewFanOut[int](1)
 	outputs := fanout.Process(ctx, input)
 
 	if len(outputs) != 1 {
-		t.Fatalf("expected 1 output channel, got %d", len(outputs))
+		t.Errorf("expected 1 output, got %d", len(outputs))
+		return
 	}
 
-	results := make([]int, 0, 3)
-	for val := range outputs[0] {
-		results = append(results, val)
+	results := collectResults(outputs[0], 100*time.Millisecond)
+
+	if len(results) != 2 {
+		t.Errorf("expected 2 results, got %d", len(results))
+		return
 	}
 
-	if len(results) != 3 {
-		t.Errorf("expected 3 values, got %d", len(results))
+	// First should be success
+	if results[0].IsError() {
+		t.Errorf("first result: expected success, got error: %v", results[0].Error())
+	} else if results[0].Value() != 42 {
+		t.Errorf("first result: expected 42, got %d", results[0].Value())
+	}
+
+	// Second should be error
+	if !results[1].IsError() {
+		t.Errorf("second result: expected error, got success: %v", results[1].Value())
+	} else if results[1].Error().Item != 99 {
+		t.Errorf("second result: expected error item 99, got %v", results[1].Error().Item)
 	}
 }
 
-// TestFanOutContextCancellation tests graceful shutdown.
-func TestFanOutContextCancellation(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+func TestFanOut_EmptyInput(t *testing.T) {
+	ctx := context.Background()
+	fanout := NewFanOut[int](3)
 
-	input := make(chan int)
-	fanout := NewFanOut[int](2)
+	input := make(chan Result[int])
+	close(input) // Empty input
+
 	outputs := fanout.Process(ctx, input)
 
-	// Start consumers.
-	var wg sync.WaitGroup
-	counts := make([]int, 2)
-
-	for i, out := range outputs {
-		wg.Add(1)
-		go func(idx int, ch <-chan int) {
-			defer wg.Done()
-			for range ch {
-				counts[idx]++
+	// All outputs should close immediately
+	for i, output := range outputs {
+		select {
+		case result, ok := <-output:
+			if ok {
+				t.Errorf("output %d: expected closed channel, got result: %v", i, result)
 			}
-		}(i, out)
-	}
-
-	// Send data continuously.
-	go func() {
-		for i := 0; ; i++ {
-			select {
-			case input <- i:
-				time.Sleep(10 * time.Millisecond)
-			case <-ctx.Done():
-				close(input)
-				return
-			}
-		}
-	}()
-
-	// Let it run for a bit.
-	time.Sleep(100 * time.Millisecond)
-	cancel()
-
-	wg.Wait()
-
-	// Should have received some values.
-	for i, count := range counts {
-		if count == 0 {
-			t.Errorf("consumer %d: expected some values, got 0", i)
+		case <-time.After(100 * time.Millisecond):
+			t.Errorf("output %d: channel should have closed immediately", i)
 		}
 	}
 }
 
-// TestFanOutLargeData tests fan-out with large data volume.
-func TestFanOutLargeData(t *testing.T) {
+func TestFanOut_NoGoroutineLeaks(_ *testing.T) {
+	// This test verifies that the FanOut processor doesn't leak goroutines
 	ctx := context.Background()
 
-	input := make(chan int, 100)
-	fanout := NewFanOut[int](5)
-	outputs := fanout.Process(ctx, input)
-
-	// Send lots of data.
-	go func() {
-		for i := 0; i < 1000; i++ {
-			input <- i
-		}
-		close(input)
-	}()
-
-	// Concurrent consumers.
-	var wg sync.WaitGroup
-	sums := make([]int, 5)
-
-	for i, out := range outputs {
-		wg.Add(1)
-		go func(idx int, ch <-chan int) {
-			defer wg.Done()
-			sum := 0
-			for val := range ch {
-				sum += val
-			}
-			sums[idx] = sum
-		}(i, out)
-	}
-
-	wg.Wait()
-
-	// All sums should be equal.
-	expectedSum := (999 * 1000) / 2 // Sum of 0..999
-	for i, sum := range sums {
-		if sum != expectedSum {
-			t.Errorf("consumer %d: expected sum %d, got %d", i, expectedSum, sum)
-		}
-	}
-}
-
-// TestFanOutZeroOutputs tests handling of n=0.
-func TestFanOutZeroOutputs(t *testing.T) {
-	ctx := context.Background()
-
-	input := make(chan int, 1)
-	input <- 42
-	close(input)
-
-	fanout := NewFanOut[int](0) // Creates 0 outputs
-	outputs := fanout.Process(ctx, input)
-
-	if len(outputs) != 0 {
-		t.Fatalf("expected 0 output channels, got %d", len(outputs))
-	}
-
-	// No outputs to consume from - input is effectively discarded
-}
-
-// BenchmarkFanOut benchmarks fan-out performance.
-func BenchmarkFanOut(b *testing.B) {
-	ctx := context.Background()
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		input := make(chan int, 100)
+	for i := 0; i < 10; i++ {
 		fanout := NewFanOut[int](3)
+
+		input := make(chan Result[int], 1)
+		input <- NewSuccess(i)
+		close(input)
+
 		outputs := fanout.Process(ctx, input)
 
-		// Start consumers.
+		// Consume all outputs
 		var wg sync.WaitGroup
-		for _, out := range outputs {
+		for j := 0; j < 3; j++ {
 			wg.Add(1)
-			go func(ch <-chan int) {
+			go func(index int) {
 				defer wg.Done()
-				//nolint:revive // empty-block: necessary to drain channel
-				for range ch {
-					// Consume.
+				//nolint:revive // empty-block: intentional channel draining
+				for range outputs[index] {
+					// Drain the channel
 				}
-			}(out)
+			}(j)
 		}
+		wg.Wait()
+	}
 
-		// Send data.
-		for j := 0; j < 100; j++ {
-			input <- j
-		}
+	// If there were goroutine leaks, this test would hang or fail under race detection
+	// The fact that it completes indicates proper cleanup
+}
+
+// Benchmark tests for performance analysis.
+func BenchmarkFanOut_SingleItem(b *testing.B) {
+	ctx := context.Background()
+	fanout := NewFanOut[int](3)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		input := make(chan Result[int], 1)
+		input <- NewSuccess(i)
 		close(input)
 
+		outputs := fanout.Process(ctx, input)
+
+		// Consume outputs
+		var wg sync.WaitGroup
+		for j := 0; j < 3; j++ {
+			wg.Add(1)
+			go func(index int) {
+				defer wg.Done()
+				//nolint:revive // empty-block: intentional channel draining
+				for range outputs[index] {
+					// Consume
+				}
+			}(j)
+		}
 		wg.Wait()
 	}
 }
 
-// Example demonstrates distributing work to multiple workers.
-func ExampleFanOut() {
+func BenchmarkFanOut_MultipleItems(b *testing.B) {
 	ctx := context.Background()
+	fanout := NewFanOut[int](3)
+	const itemCount = 100
 
-	// Create tasks to distribute.
-	tasks := make(chan string, 6)
-	tasks <- "process-order-123"
-	tasks <- "send-email-456"
-	tasks <- "update-inventory-789"
-	tasks <- "generate-report-012"
-	tasks <- "backup-data-345"
-	tasks <- "analyze-metrics-678"
-	close(tasks)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		input := make(chan Result[int], itemCount)
+		for j := 0; j < itemCount; j++ {
+			input <- NewSuccess(j)
+		}
+		close(input)
 
-	// Distribute to 3 workers.
-	fanout := NewFanOut[string](3)
-	workerQueues := fanout.Process(ctx, tasks)
+		outputs := fanout.Process(ctx, input)
 
-	// Simulate workers processing tasks.
-	var wg sync.WaitGroup
-	for i, queue := range workerQueues {
-		wg.Add(1)
-		go func(workerID int, tasks <-chan string) {
-			defer wg.Done()
-			for task := range tasks {
-				fmt.Printf("Worker %d: %s\n", workerID, task)
-			}
-		}(i+1, queue)
+		// Consume outputs
+		var wg sync.WaitGroup
+		for j := 0; j < 3; j++ {
+			wg.Add(1)
+			go func(index int) {
+				defer wg.Done()
+				//nolint:revive // empty-block: intentional channel draining
+				for range outputs[index] {
+					// Consume
+				}
+			}(j)
+		}
+		wg.Wait()
 	}
-
-	wg.Wait()
-
-	// Output (order may vary):
-	// Worker 1: process-order-123
-	// Worker 2: send-email-456
-	// Worker 3: update-inventory-789
-	// Worker 1: generate-report-012
-	// Worker 2: backup-data-345
-	// Worker 3: analyze-metrics-678
 }

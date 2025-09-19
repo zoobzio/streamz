@@ -6,8 +6,24 @@ import (
 )
 
 // TumblingWindow groups items into fixed-size, non-overlapping time windows.
-// Each item belongs to exactly one window, and windows are emitted when their
-// time period expires, making it ideal for time-based aggregations.
+// Each item gets window metadata attached and is emitted when its window expires,
+// making it ideal for time-based aggregations with Result[T] metadata flow.
+//
+// This version processes Result[T] streams, attaching window metadata to each
+// individual Result for comprehensive monitoring and downstream processing.
+//
+// Key characteristics:
+//   - Non-overlapping: Each item belongs to exactly one window
+//   - Fixed duration: All windows have the same size
+//   - Metadata-driven: Results carry window context via metadata
+//   - Predictable emission: Results emit at exact window boundaries
+//
+// Performance characteristics:
+//   - Result emission latency: Exactly at window boundary (size duration)
+//   - Memory usage: O(items_per_window) - bounded by window size
+//   - Processing overhead: Metadata attachment per item
+//   - Goroutine usage: 1 goroutine per processor instance
+//   - No unbounded memory growth - results are emitted and cleared
 //
 //nolint:govet // fieldalignment: struct layout optimized for readability
 type TumblingWindow[T any] struct {
@@ -16,44 +32,52 @@ type TumblingWindow[T any] struct {
 	size  time.Duration
 }
 
-// NewTumblingWindow creates a processor that groups items into fixed-size time windows.
-// Unlike sliding windows, tumbling windows don't overlap - each item belongs to exactly
+// NewTumblingWindow creates a processor that groups Results into fixed-size time windows.
+// Unlike sliding windows, tumbling windows don't overlap - each Result belongs to exactly
 // one window. Windows are emitted when their time period expires.
 //
 // When to use:
-//   - Time-based aggregations (hourly stats, daily summaries)
-//   - Periodic batch processing
+//   - Time-based aggregations with error tracking (hourly stats, daily summaries)
+//   - Periodic batch processing with failure monitoring
 //   - Rate calculations over fixed intervals
-//   - Log rotation and archival
-//   - Metrics collection and reporting
+//   - Log analysis and error reporting over time periods
+//   - Metrics collection with success/failure rates
 //
 // Example:
 //
-//	// Aggregate events into 1-minute windows
-//	window := streamz.NewTumblingWindow[Event](time.Minute, Real)
+//	// Process events with 1-minute window metadata
+//	window := streamz.NewTumblingWindow[Event](time.Minute, streamz.RealClock)
 //
-//	windows := window.Process(ctx, events)
-//	for w := range windows {
-//		summary := aggregateEvents(w.Items)
-//		log.Printf("Window [%s - %s]: %d events, avg value: %.2f",
-//			w.Start.Format("15:04:05"),
-//			w.End.Format("15:04:05"),
-//			len(w.Items),
-//			summary.Average)
+//	results := window.Process(ctx, eventResults)
+//	for result := range results {
+//		// Each result now has window metadata attached
+//		if meta, err := streamz.GetWindowMetadata(result); err == nil {
+//			fmt.Printf("Event in window [%s - %s]: %v\n",
+//				meta.Start.Format("15:04:05"),
+//				meta.End.Format("15:04:05"),
+//				result.Value())
+//		}
 //	}
 //
-//	// Hourly report generation
-//	hourly := streamz.NewTumblingWindow[Metric](time.Hour, Real)
-//	reports := hourly.Process(ctx, metrics)
-//	for window := range reports {
-//		generateHourlyReport(window)
+//	// Collect into traditional windows when needed
+//	collector := streamz.NewWindowCollector[Event]()
+//	collections := collector.Process(ctx, results)
+//	for collection := range collections {
+//		values := collection.Values()   // Only successful events
+//		errors := collection.Errors()   // Only errors
+//		generateReport(values, errors)
 //	}
 //
 // Parameters:
-//   - size: Duration of each window (e.g., 1 minute, 1 hour)
-//   - clock: Clock interface for time operations
+//   - size: Duration of each window (must be > 0)
+//   - clock: Clock interface for time operations (use RealClock for production)
 //
-// Returns a new TumblingWindow processor for time-based grouping.
+// Returns a new TumblingWindow processor for time-based grouping with Result[T] support.
+//
+// Performance notes:
+//   - Optimal for non-overlapping aggregations
+//   - Minimal memory overhead (single active window)
+//   - Predictable latency: exactly window size duration
 func NewTumblingWindow[T any](size time.Duration, clock Clock) *TumblingWindow[T] {
 	return &TumblingWindow[T]{
 		size:  size,
@@ -62,8 +86,29 @@ func NewTumblingWindow[T any](size time.Duration, clock Clock) *TumblingWindow[T
 	}
 }
 
-func (w *TumblingWindow[T]) Process(ctx context.Context, in <-chan T) <-chan Window[T] {
-	out := make(chan Window[T])
+// WithName sets a custom name for this processor.
+func (w *TumblingWindow[T]) WithName(name string) *TumblingWindow[T] {
+	w.name = name
+	return w
+}
+
+// Process groups Results into fixed-size time windows, emitting individual Results with window metadata.
+// Both successful values and errors are captured with their window context, enabling comprehensive
+// error tracking and success rate monitoring over time periods.
+//
+// Window behavior:
+//   - Each Result gets window metadata attached (start, end, type, size)
+//   - Results are emitted exactly at their window boundary expiration
+//   - Empty windows produce no output
+//   - On context cancellation or input close, partial windows emit their Results if non-empty
+//
+// Performance and resource usage:
+//   - Zero allocation for window tracking (single active window)
+//   - Predictable memory: size = items_per_window × average_item_size
+//   - Latency: Items buffered for up to window size duration
+//   - Thread-safe: Single goroutine architecture prevents races
+func (w *TumblingWindow[T]) Process(ctx context.Context, in <-chan Result[T]) <-chan Result[T] {
+	out := make(chan Result[T])
 
 	go func() {
 		defer close(out)
@@ -72,38 +117,42 @@ func (w *TumblingWindow[T]) Process(ctx context.Context, in <-chan T) <-chan Win
 		defer ticker.Stop()
 
 		now := w.clock.Now()
-		window := &Window[T]{
-			Items: []T{},
+		currentWindow := WindowMetadata{
 			Start: now,
 			End:   now.Add(w.size),
+			Type:  "tumbling",
+			Size:  w.size,
 		}
+
+		var windowResults []Result[T]
 
 		for {
 			select {
 			case <-ctx.Done():
-				if len(window.Items) > 0 {
-					out <- *window
-				}
+				// Emit remaining results with window metadata
+				w.emitWindowResults(ctx, out, windowResults, currentWindow)
 				return
 
-			case item, ok := <-in:
+			case result, ok := <-in:
 				if !ok {
-					if len(window.Items) > 0 {
-						out <- *window
-					}
+					// Input closed, emit remaining results
+					w.emitWindowResults(ctx, out, windowResults, currentWindow)
 					return
 				}
-				window.Items = append(window.Items, item)
+				windowResults = append(windowResults, result)
 
 			case <-ticker.C():
-				if len(window.Items) > 0 {
-					out <- *window
-				}
+				// Window expired, emit all results with window metadata
+				w.emitWindowResults(ctx, out, windowResults, currentWindow)
+
+				// Create new window
+				windowResults = nil
 				now := w.clock.Now()
-				window = &Window[T]{
-					Items: []T{},
+				currentWindow = WindowMetadata{
 					Start: now,
 					End:   now.Add(w.size),
+					Type:  "tumbling",
+					Size:  w.size,
 				}
 			}
 		}
@@ -112,6 +161,19 @@ func (w *TumblingWindow[T]) Process(ctx context.Context, in <-chan T) <-chan Win
 	return out
 }
 
+// emitWindowResults emits all results in the window with window metadata attached.
+func (*TumblingWindow[T]) emitWindowResults(ctx context.Context, out chan<- Result[T], results []Result[T], meta WindowMetadata) {
+	for _, result := range results {
+		enhanced := AddWindowMetadata(result, meta)
+		select {
+		case out <- enhanced:
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// Name returns the processor name for debugging and monitoring.
 func (w *TumblingWindow[T]) Name() string {
 	return w.name
 }

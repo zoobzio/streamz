@@ -6,87 +6,129 @@ import (
 
 // Filter selectively passes items through a stream based on a predicate function.
 // Only items for which the predicate returns true are emitted to the output channel.
-// This is one of the most fundamental stream processing operations.
+// Items that don't match the predicate are discarded.
+//
+// Filter is one of the most fundamental stream processing operations, commonly used for:
+//   - Data validation and quality control
+//   - Business rule application
+//   - Security filtering and content moderation
+//   - Performance optimization by reducing downstream load
+//   - A/B testing and conditional data routing
+//
+//nolint:govet // fieldalignment: struct layout optimized for readability
 type Filter[T any] struct {
-	predicate func(T) bool
 	name      string
+	predicate func(T) bool
 }
 
 // NewFilter creates a processor that selectively passes items based on a predicate.
-// Only items for which the predicate returns true are forwarded to the output stream.
-// This is one of the most fundamental stream operations.
-// Use the fluent API to configure optional behavior like custom names.
+// Items for which the predicate returns true are forwarded unchanged.
+// Items for which the predicate returns false are discarded.
+//
+// The predicate function should be pure (no side effects) and deterministic
+// for consistent and predictable filtering behavior.
 //
 // When to use:
-//   - Data validation and quality control
-//   - Removing noise or irrelevant data
-//   - Implementing business rules and conditions
-//   - Subsetting data based on criteria
-//   - Security filtering and access control
+//   - Remove invalid or unwanted data from streams
+//   - Apply business rules and validation logic
+//   - Filter based on data quality requirements
+//   - Implement conditional processing logic
+//   - Reduce processing load by filtering upstream
 //
 // Example:
 //
-//	// Simple filter with auto-generated name
+//	// Filter positive numbers
 //	positive := streamz.NewFilter(func(n int) bool {
 //		return n > 0
 //	})
 //
-//	// Filter with custom name for monitoring
-//	positive := streamz.NewFilter(func(n int) bool {
-//		return n > 0
-//	}).WithName("positive-numbers")
+//	// Filter non-empty strings
+//	nonEmpty := streamz.NewFilter(func(s string) bool {
+//		return strings.TrimSpace(s) != ""
+//	})
 //
-//	positives := positive.Process(ctx, numbers)
-//	for n := range positives {
-//		// Only positive numbers pass through
-//		fmt.Printf("Positive: %d\n", n)
+//	// Filter valid orders
+//	validOrders := streamz.NewFilter(func(order Order) bool {
+//		return order.ID != "" && order.Amount > 0 && order.Status == "pending"
+//	})
+//
+//	results := positive.Process(ctx, input)
+//	for result := range results {
+//		if result.IsError() {
+//			log.Printf("Processing error: %v", result.Error())
+//		} else {
+//			fmt.Printf("Filtered result: %v\n", result.Value())
+//		}
 //	}
 //
-//	// Filter events by multiple criteria
-//	important := streamz.NewFilter(func(e Event) bool {
-//		return e.Priority == "HIGH" &&
-//		       e.Timestamp.After(cutoffTime) &&
-//		       contains(allowedTypes, e.Type)
-//	}).WithName("important-events")
-//
 // Parameters:
-//   - predicate: Function that returns true for items to keep
+//   - predicate: Function that returns true for items to keep, false to discard
 //
-// Returns a new Filter processor with fluent configuration.
+// Returns a new Filter processor.
 func NewFilter[T any](predicate func(T) bool) *Filter[T] {
 	return &Filter[T]{
+		name:      "filter",
 		predicate: predicate,
-		name:      "filter", // default name
 	}
 }
 
 // WithName sets a custom name for this processor.
 // If not set, defaults to "filter".
+// The name is used for debugging, monitoring, and error reporting.
 func (f *Filter[T]) WithName(name string) *Filter[T] {
 	f.name = name
 	return f
 }
 
-func (f *Filter[T]) Process(ctx context.Context, in <-chan T) <-chan T {
-	out := make(chan T)
+// Process filters input items based on the predicate function.
+// Items that match the predicate (return true) are forwarded unchanged.
+// Items that don't match the predicate are discarded.
+// Errors are passed through unchanged without applying the predicate.
+func (f *Filter[T]) Process(ctx context.Context, in <-chan Result[T]) <-chan Result[T] {
+	out := make(chan Result[T])
 
 	go func() {
 		defer close(out)
 
 		for item := range in {
-			if f.predicate(item) {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			if item.IsError() {
+				// Pass through errors unchanged
+				select {
+				case out <- Result[T]{err: &StreamError[T]{
+					Item:          item.Error().Item,
+					Err:           item.Error().Err,
+					ProcessorName: f.name,
+					Timestamp:     item.Error().Timestamp,
+				}}:
+				case <-ctx.Done():
+					return
+				}
+				continue
+			}
+
+			// Apply predicate to success values
+			if f.predicate(item.Value()) {
+				// Keep the item - forward unchanged
 				select {
 				case out <- item:
 				case <-ctx.Done():
 					return
 				}
 			}
+			// Items that don't match predicate are silently discarded
 		}
 	}()
 
 	return out
 }
 
+// Name returns the processor name for debugging and monitoring.
 func (f *Filter[T]) Name() string {
 	return f.name
 }

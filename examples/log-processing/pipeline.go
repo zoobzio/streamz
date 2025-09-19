@@ -97,6 +97,15 @@ func processBatched(ctx context.Context, logs <-chan LogEntry) error {
 	// Add metrics collection
 	metricsProcessor := MetricsCollector.Process(ctx, logs)
 
+	// Convert LogEntry channel to Result[LogEntry] channel for batcher
+	resultChan := make(chan streamz.Result[LogEntry])
+	go func() {
+		defer close(resultChan)
+		for entry := range metricsProcessor {
+			resultChan <- streamz.NewSuccess(entry)
+		}
+	}()
+
 	// Create batcher for efficient database writes
 	batcher := streamz.NewBatcher[LogEntry](streamz.BatchConfig{
 		MaxSize:    BatchSize,
@@ -104,9 +113,20 @@ func processBatched(ctx context.Context, logs <-chan LogEntry) error {
 	}, streamz.RealClock)
 
 	// Process batches
-	batches := batcher.Process(ctx, metricsProcessor)
+	batches := batcher.Process(ctx, resultChan)
 
-	for batch := range batches {
+	for batchResult := range batches {
+		// Handle batch result
+		if batchResult.IsError() {
+			fmt.Printf("❌ Batch processing error: %v\n", batchResult.Error())
+			continue
+		}
+
+		batch := batchResult.Value()
+		if len(batch) == 0 {
+			continue
+		}
+
 		// Create log batch
 		logBatch := LogBatch{
 			ID:        fmt.Sprintf("batch-%d", time.Now().UnixNano()),
@@ -140,9 +160,18 @@ func processWithAlerts(ctx context.Context, logs <-chan LogEntry) error {
 	// Add metrics collection
 	metricsProcessor := MetricsCollector.Process(ctx, logs)
 
+	// Convert LogEntry channel to Result[LogEntry] channel for fanout
+	resultChan := make(chan streamz.Result[LogEntry])
+	go func() {
+		defer close(resultChan)
+		for entry := range metricsProcessor {
+			resultChan <- streamz.NewSuccess(entry)
+		}
+	}()
+
 	// Fan out for parallel processing
 	fanout := streamz.NewFanOut[LogEntry](2)
-	streams := fanout.Process(ctx, metricsProcessor)
+	streams := fanout.Process(ctx, resultChan)
 
 	// Stream 1: Batch storage (existing functionality)
 	go func() {
@@ -152,7 +181,17 @@ func processWithAlerts(ctx context.Context, logs <-chan LogEntry) error {
 		}, streamz.RealClock)
 
 		batches := batcher.Process(ctx, streams[0])
-		for batch := range batches {
+		for batchResult := range batches {
+			if batchResult.IsError() {
+				fmt.Printf("❌ Batch processing error: %v\n", batchResult.Error())
+				continue
+			}
+
+			batch := batchResult.Value()
+			if len(batch) == 0 {
+				continue
+			}
+
 			logBatch := LogBatch{
 				ID:        fmt.Sprintf("batch-%d", time.Now().UnixNano()),
 				Logs:      batch,
@@ -177,7 +216,13 @@ func processWithAlerts(ctx context.Context, logs <-chan LogEntry) error {
 	errors := errorFilter.Process(ctx, streams[1])
 
 	// Send immediate alerts for each error (causes alert fatigue!)
-	for errorLog := range errors {
+	for errorResult := range errors {
+		if errorResult.IsError() {
+			fmt.Printf("❌ Error processing error log: %v\n", errorResult.Error())
+			continue
+		}
+
+		errorLog := errorResult.Value()
 		alert := Alert{
 			ID:        fmt.Sprintf("alert-%d", time.Now().UnixNano()),
 			Type:      AlertTypeError,
@@ -207,9 +252,18 @@ func processWithSmartAlerts(ctx context.Context, logs <-chan LogEntry) error {
 	// Add metrics collection
 	metricsProcessor := MetricsCollector.Process(ctx, logs)
 
+	// Convert LogEntry channel to Result[LogEntry] channel for fanout
+	resultChan := make(chan streamz.Result[LogEntry])
+	go func() {
+		defer close(resultChan)
+		for entry := range metricsProcessor {
+			resultChan <- streamz.NewSuccess(entry)
+		}
+	}()
+
 	// Fan out for parallel processing
 	fanout := streamz.NewFanOut[LogEntry](3)
-	streams := fanout.Process(ctx, metricsProcessor)
+	streams := fanout.Process(ctx, resultChan)
 
 	// Stream 1: Batch storage
 	go func() {
@@ -219,7 +273,16 @@ func processWithSmartAlerts(ctx context.Context, logs <-chan LogEntry) error {
 		}, streamz.RealClock)
 
 		batches := batcher.Process(ctx, streams[0])
-		for batch := range batches {
+		for batchResult := range batches {
+			if batchResult.IsError() {
+				fmt.Printf("❌ Batch processing error: %v\n", batchResult.Error())
+				continue
+			}
+
+			batch := batchResult.Value()
+			if len(batch) == 0 {
+				continue
+			}
 			logBatch := LogBatch{
 				ID:    fmt.Sprintf("batch-%d", time.Now().UnixNano()),
 				Logs:  batch,
@@ -260,7 +323,13 @@ func processWithSmartAlerts(ctx context.Context, logs <-chan LogEntry) error {
 
 	criticals := criticalFilter.Process(ctx, streams[2])
 
-	for critical := range criticals {
+	for criticalResult := range criticals {
+		if criticalResult.IsError() {
+			fmt.Printf("❌ Error processing critical log: %v\n", criticalResult.Error())
+			continue
+		}
+
+		critical := criticalResult.Value()
 		alert := Alert{
 			ID:        fmt.Sprintf("alert-%d", time.Now().UnixNano()),
 			Type:      AlertTypeError,
@@ -290,9 +359,18 @@ func processWithSecurity(ctx context.Context, logs <-chan LogEntry) error {
 	enricher := NewLogEnricher(Users)
 	enriched := enricher.Process(ctx, metricsProcessor)
 
+	// Convert LogEntry channel to Result[LogEntry] channel for fanout
+	resultChan := make(chan streamz.Result[LogEntry])
+	go func() {
+		defer close(resultChan)
+		for entry := range enriched {
+			resultChan <- streamz.NewSuccess(entry)
+		}
+	}()
+
 	// Fan out for parallel processing
 	fanout := streamz.NewFanOut[LogEntry](4)
-	streams := fanout.Process(ctx, enriched)
+	streams := fanout.Process(ctx, resultChan)
 
 	// Stream 1: Batch storage
 	go func() {
@@ -302,7 +380,16 @@ func processWithSecurity(ctx context.Context, logs <-chan LogEntry) error {
 		}, streamz.RealClock)
 
 		batches := batcher.Process(ctx, streams[0])
-		for batch := range batches {
+		for batchResult := range batches {
+			if batchResult.IsError() {
+				fmt.Printf("❌ Batch processing error: %v\n", batchResult.Error())
+				continue
+			}
+
+			batch := batchResult.Value()
+			if len(batch) == 0 {
+				continue
+			}
 			logBatch := LogBatch{
 				ID:    fmt.Sprintf("batch-%d", time.Now().UnixNano()),
 				Logs:  batch,
@@ -360,7 +447,13 @@ func processWithSecurity(ctx context.Context, logs <-chan LogEntry) error {
 
 	criticals := criticalFilter.Process(ctx, streams[3])
 
-	for critical := range criticals {
+	for criticalResult := range criticals {
+		if criticalResult.IsError() {
+			fmt.Printf("❌ Error processing critical log: %v\n", criticalResult.Error())
+			continue
+		}
+
+		critical := criticalResult.Value()
 		alert := Alert{
 			ID:        fmt.Sprintf("alert-%d", time.Now().UnixNano()),
 			Type:      AlertTypeError,
@@ -435,7 +528,16 @@ func processFullProduction(ctx context.Context, logs <-chan LogEntry) error {
 		}, streamz.RealClock)
 
 		batches := adaptiveBatcher.Process(ctx, streams[0])
-		for batch := range batches {
+		for batchResult := range batches {
+			if batchResult.IsError() {
+				fmt.Printf("❌ Batch processing error: %v\n", batchResult.Error())
+				continue
+			}
+
+			batch := batchResult.Value()
+			if len(batch) == 0 {
+				continue
+			}
 			logBatch := LogBatch{
 				ID:    fmt.Sprintf("batch-%d", time.Now().UnixNano()),
 				Logs:  batch,
@@ -498,7 +600,13 @@ func processFullProduction(ctx context.Context, logs <-chan LogEntry) error {
 
 	criticals := criticalFilter.Process(ctx, streams[3])
 
-	for critical := range criticals {
+	for criticalResult := range criticals {
+		if criticalResult.IsError() {
+			fmt.Printf("❌ Error processing critical log: %v\n", criticalResult.Error())
+			continue
+		}
+
+		critical := criticalResult.Value()
 		alert := Alert{
 			ID:        fmt.Sprintf("alert-%d", time.Now().UnixNano()),
 			Type:      AlertTypeError,

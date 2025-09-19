@@ -213,6 +213,8 @@ searches := NewDebounce[Query](500*time.Millisecond).Process(ctx, queries)
 - **[Guides](./docs/guides/patterns.md)** - Production patterns and best practices
 - **[API Reference](./docs/api/)** - Complete processor documentation
 
+🧪 **[Testing Documentation](./TESTING.md)** - Comprehensive testing guide for contributors and maintainers
+
 ## Performance
 
 streamz is designed for production workloads:
@@ -267,6 +269,50 @@ make coverage       # Generate coverage report
 make clean          # Clean generated files
 ```
 
+### Testing Architecture
+
+streamz uses a comprehensive testing architecture with clear separation of concerns:
+
+```
+streamz/
+├── *_test.go              # Unit tests (test individual processors)
+└── testing/               # All non-unit tests
+    ├── helpers/           # Shared test utilities
+    ├── integration/       # End-to-end pipeline tests  
+    ├── benchmarks/        # Performance tests
+    └── reliability/       # Stress and concurrency tests
+```
+
+**Test Categories:**
+
+- **Unit Tests** (90.5% coverage): Fast, isolated tests for individual processors
+- **Integration Tests**: Complete pipeline scenarios and processor composition
+- **Reliability Tests**: Race condition detection, stress testing, resource leak verification
+- **Benchmarks**: Performance measurement and regression detection
+
+**Running Different Test Suites:**
+```bash
+# All tests with coverage
+go test -v -race -coverprofile=coverage.out ./...
+
+# Unit tests only
+go test -v ./
+
+# Integration tests
+go test -v ./testing/integration/...
+
+# Reliability tests (with race detector)
+go test -v -race ./testing/reliability/...
+
+# Benchmarks
+go test -v -bench=. ./testing/benchmarks/...
+
+# Stress tests (long-running)
+go test -v -timeout=30m ./testing/reliability/...
+```
+
+See [TESTING.md](./TESTING.md) for detailed information about our comprehensive testing approach, quality standards, and contribution guidelines.
+
 ### Code Quality
 This project uses comprehensive linting with golangci-lint, including:
 - Security analysis (gosec)
@@ -278,11 +324,13 @@ This project uses comprehensive linting with golangci-lint, including:
 Configuration is in `.golangci.yml`. CI runs these checks automatically on all PRs.
 
 ### Contributing
+
 1. Fork the repository
 2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Run tests and linters (`make check`)
-4. Commit your changes
-5. Push to the branch
-6. Open a Pull Request
+3. Write tests for your changes (see [TESTING.md](./TESTING.md))
+4. Run tests and linters (`make check`)
+5. Commit your changes
+6. Push to the branch
+7. Open a Pull Request
 
-All PRs must pass CI checks including tests, linting, and coverage requirements.
+All PRs must pass CI checks including tests, linting, and coverage requirements. Please review our [Testing Documentation](./TESTING.md) to understand our testing standards and requirements.

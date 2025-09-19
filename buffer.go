@@ -7,6 +7,10 @@ import (
 // Buffer adds buffering capacity to a stream by creating an output channel with a buffer.
 // This helps decouple producers and consumers, allowing producers to continue sending
 // items even when consumers are temporarily slower.
+//
+// Buffer is a pass-through processor that preserves all Result[T] items unchanged,
+// whether they contain successful values or errors. It provides buffering between
+// pipeline stages without any transformation logic.
 type Buffer[T any] struct {
 	name string
 	size int
@@ -53,8 +57,11 @@ func NewBuffer[T any](size int) *Buffer[T] {
 	}
 }
 
-func (b *Buffer[T]) Process(ctx context.Context, in <-chan T) <-chan T {
-	out := make(chan T, b.size)
+// Process creates a buffered channel and passes through all Result[T] items unchanged.
+// Both successful values and errors are preserved without modification.
+// The buffer provides decoupling between producer and consumer goroutines.
+func (b *Buffer[T]) Process(ctx context.Context, in <-chan Result[T]) <-chan Result[T] {
+	out := make(chan Result[T], b.size)
 
 	go func() {
 		defer close(out)
@@ -71,6 +78,7 @@ func (b *Buffer[T]) Process(ctx context.Context, in <-chan T) <-chan T {
 	return out
 }
 
+// Name returns the processor name for identification and debugging.
 func (b *Buffer[T]) Name() string {
 	return b.name
 }

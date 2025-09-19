@@ -4,62 +4,64 @@ import (
 	"context"
 )
 
-// Mapper transforms each item in a stream from one type to another using a mapping function.
-// This is a fundamental operation for data transformation in streaming pipelines,
-// allowing type-safe conversions and data enrichment.
+// Mapper transforms items from one type to another using a synchronous function.
+// It processes items sequentially without goroutines, making it ideal for fast
+// transformations that don't benefit from concurrency overhead.
+//
+// For CPU-intensive or I/O-bound operations that can benefit from parallelization,
+// use AsyncMapper instead.
+//
+//nolint:govet // fieldalignment: struct layout optimized for readability
 type Mapper[In, Out any] struct {
-	fn   func(In) Out
 	name string
+	fn   func(context.Context, In) (Out, error)
 }
 
-// NewMapper creates a processor that transforms items from one type to another.
-// This is the fundamental transformation operation, allowing type-safe conversions
-// and data enrichment throughout the stream pipeline.
-// Use the fluent API to configure optional behavior like custom names.
+// NewMapper creates a processor that transforms items synchronously.
+// Unlike AsyncMapper, this processes items one at a time in sequence,
+// making it suitable for simple, fast transformations.
 //
 // When to use:
-//   - Type conversions between data representations
-//   - Data enrichment and augmentation
-//   - Extracting fields or computing derived values
-//   - Normalizing data formats
-//   - Implementing business logic transformations
+//   - Simple type conversions and data formatting
+//   - Fast computations that don't justify goroutine overhead
+//   - Transformations that must maintain strict sequential processing
+//   - Operations where concurrency would add complexity without benefit
+//   - Memory-sensitive scenarios where goroutine pools are costly
 //
 // Example:
 //
-//	// Simple mapper with auto-generated name
-//	upper := streamz.NewMapper(strings.ToUpper)
+//	// Simple type conversion
+//	toString := streamz.NewMapper(func(ctx context.Context, n int) (string, error) {
+//		return fmt.Sprintf("%d", n), nil
+//	})
 //
-//	// Mapper with custom name for monitoring
-//	upper := streamz.NewMapper(strings.ToUpper).WithName("uppercase")
+//	// Data formatting
+//	formatUser := streamz.NewMapper(func(ctx context.Context, u User) (string, error) {
+//		return fmt.Sprintf("%s <%s>", u.Name, u.Email), nil
+//	})
 //
-//	uppercased := upper.Process(ctx, strings)
-//	for s := range uppercased {
-//		fmt.Println(s) // All uppercase
+//	// Mathematical transformations
+//	double := streamz.NewMapper(func(ctx context.Context, n int) (int, error) {
+//		return n * 2, nil
+//	})
+//
+//	results := toString.Process(ctx, input)
+//	for result := range results {
+//		if result.IsError() {
+//			log.Printf("Processing error: %v", result.Error())
+//		} else {
+//			fmt.Printf("Result: %s\n", result.Value())
+//		}
 //	}
 //
-//	// Extract and transform nested data
-//	usernames := streamz.NewMapper(func(u User) string {
-//		return fmt.Sprintf("%s <%s>", u.Name, u.Email)
-//	}).WithName("extract-username")
-//
-//	// Type conversion with computation
-//	totals := streamz.NewMapper(func(order Order) OrderSummary {
-//		return OrderSummary{
-//			OrderID:   order.ID,
-//			Total:     calculateTotal(order.Items),
-//			ItemCount: len(order.Items),
-//			Status:    order.Status,
-//		}
-//	}).WithName("calculate-total")
-//
 // Parameters:
-//   - fn: Pure transformation function from input to output type
+//   - fn: Transformation function that converts In to Out
 //
-// Returns a new Mapper processor with fluent configuration.
-func NewMapper[In, Out any](fn func(In) Out) *Mapper[In, Out] {
+// Returns a new Mapper processor.
+func NewMapper[In, Out any](fn func(context.Context, In) (Out, error)) *Mapper[In, Out] {
 	return &Mapper[In, Out]{
+		name: "mapper",
 		fn:   fn,
-		name: "mapper", // default name
 	}
 }
 
@@ -70,17 +72,51 @@ func (m *Mapper[In, Out]) WithName(name string) *Mapper[In, Out] {
 	return m
 }
 
-func (m *Mapper[In, Out]) Process(ctx context.Context, in <-chan In) <-chan Out {
-	out := make(chan Out)
+// Process transforms input items synchronously using the provided function.
+// Errors are passed through unchanged. Success values are transformed and
+// wrapped in new Result instances.
+func (m *Mapper[In, Out]) Process(ctx context.Context, in <-chan Result[In]) <-chan Result[Out] {
+	out := make(chan Result[Out])
 
 	go func() {
 		defer close(out)
 
 		for item := range in {
 			select {
-			case out <- m.fn(item):
 			case <-ctx.Done():
 				return
+			default:
+			}
+
+			if item.IsError() {
+				// Pass through errors unchanged with correct type
+				select {
+				case out <- Result[Out]{err: &StreamError[Out]{
+					Item:          *new(Out), // zero value for Out type
+					Err:           item.Error(),
+					ProcessorName: m.name,
+					Timestamp:     item.Error().Timestamp,
+				}}:
+				case <-ctx.Done():
+					return
+				}
+				continue
+			}
+
+			// Transform the success value
+			result, err := m.fn(ctx, item.Value())
+			if err != nil {
+				select {
+				case out <- NewError(result, err, m.name):
+				case <-ctx.Done():
+					return
+				}
+			} else {
+				select {
+				case out <- NewSuccess(result):
+				case <-ctx.Done():
+					return
+				}
 			}
 		}
 	}()
@@ -88,6 +124,7 @@ func (m *Mapper[In, Out]) Process(ctx context.Context, in <-chan In) <-chan Out 
 	return out
 }
 
+// Name returns the processor name for debugging and monitoring.
 func (m *Mapper[In, Out]) Name() string {
 	return m.name
 }

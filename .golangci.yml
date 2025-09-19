@@ -153,12 +153,23 @@ linters-settings:
     locale: US
 
 issues:
+  exclude-dirs:
+    - OLD
   exclude-dirs-use-default: false
   exclude-rules:
     # Allow TODO comments in development
     - linters:
         - godox
       text: "TODO|FIXME|BUG"
+    
+    # Exclude OLD directory from all linting
+    - path: OLD/.*
+      linters:
+        - typecheck
+        - govet
+        - errcheck
+        - staticcheck
+        - unused
     
     # Test files can have longer functions and different struct ordering
     - path: _test\.go

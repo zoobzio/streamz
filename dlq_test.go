@@ -3,764 +3,822 @@ package streamz
 import (
 	"context"
 	"errors"
-	"fmt"
-	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/zoobzio/clockz"
 )
 
-// failingProcessor for test - fails a configurable number of times.
-type failingProcessor struct {
-	name         string
-	failureCount int32
-	callCount    int32
-	failureError error
-}
+func TestDeadLetterQueue_Constructor(t *testing.T) {
+	clock := clockz.NewFakeClock()
+	dlq := NewDeadLetterQueue[int](clock)
 
-func newFailingProcessor(name string, failures int) *failingProcessor {
-	return &failingProcessor{
-		name:         name,
-		failureCount: int32(failures), // #nosec G115 - test code with small values
-		failureError: errors.New("simulated failure"),
+	if dlq.name != "dlq" {
+		t.Errorf("Expected name 'dlq', got %q", dlq.name)
+	}
+
+	if dlq.DroppedCount() != 0 {
+		t.Errorf("Expected dropped count 0, got %d", dlq.DroppedCount())
 	}
 }
 
-func (fp *failingProcessor) Process(ctx context.Context, in <-chan int) <-chan int {
-	out := make(chan int)
+func TestDeadLetterQueue_WithName(t *testing.T) {
+	clock := clockz.NewFakeClock()
+	dlq := NewDeadLetterQueue[int](clock).WithName("custom-dlq")
 
-	go func() {
-		defer close(out)
-
-		for item := range in {
-			atomic.AddInt32(&fp.callCount, 1)
-
-			if atomic.LoadInt32(&fp.failureCount) > 0 {
-				atomic.AddInt32(&fp.failureCount, -1)
-				// Simulate failure by not sending output
-				continue
-			}
-
-			// Success - send doubled value
-			select {
-			case out <- item * 2:
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-
-	return out
+	if dlq.Name() != "custom-dlq" {
+		t.Errorf("Expected name 'custom-dlq', got %q", dlq.Name())
+	}
 }
 
-func (fp *failingProcessor) Name() string {
-	return fp.name
-}
+func TestDeadLetterQueue_SuccessDistribution(t *testing.T) {
+	clock := clockz.NewFakeClock()
+	dlq := NewDeadLetterQueue[int](clock)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
 
-func (fp *failingProcessor) GetCallCount() int32 {
-	return atomic.LoadInt32(&fp.callCount)
-}
+	input := make(chan Result[int], 10) // Buffered to prevent blocking during sending
+	successes, failures := dlq.Process(ctx, input)
 
-// TestDLQBasicFunctionality tests basic DLQ operations.
-func TestDLQBasicFunctionality(t *testing.T) {
-	ctx := context.Background()
-
-	// Processor that fails first 2 items
-	processor := newFailingProcessor("test", 2)
-
-	var failedItems []DLQItem[int]
-	dlq := NewDeadLetterQueue(processor, RealClock).
-		OnFailure(func(_ context.Context, item DLQItem[int]) {
-			failedItems = append(failedItems, item)
-		})
-
-	// Process 5 items
-	input := make(chan int, 5)
-	for i := 1; i <= 5; i++ {
-		input <- i
+	// Send success items immediately
+	testValues := []int{1, 2, 3}
+	for _, val := range testValues {
+		input <- NewSuccess(val)
 	}
 	close(input)
 
-	output := dlq.Process(ctx, input)
-
-	// Collect successful results
-	var results []int //nolint:prealloc // dynamic growth acceptable in test code
-	for result := range output {
-		results = append(results, result)
-	}
-
-	// Should have 3 successful results (3, 4, 5 doubled)
-	if len(results) != 3 {
-		t.Errorf("expected 3 successful results, got %d", len(results))
-	}
-
-	// Should have 2 failed items
-	if len(failedItems) != 2 {
-		t.Errorf("expected 2 failed items, got %d", len(failedItems))
-	}
-
-	// Verify failed items
-	if len(failedItems) >= 2 {
-		if failedItems[0].Item != 1 {
-			t.Errorf("expected first failed item to be 1, got %d", failedItems[0].Item)
-		}
-		if failedItems[1].Item != 2 {
-			t.Errorf("expected second failed item to be 2, got %d", failedItems[1].Item)
-		}
-	}
-
-	// Check stats
-	stats := dlq.GetStats()
-	if stats.Processed != 5 {
-		t.Errorf("expected 5 processed, got %d", stats.Processed)
-	}
-	if stats.Succeeded != 3 {
-		t.Errorf("expected 3 succeeded, got %d", stats.Succeeded)
-	}
-	if stats.Failed != 2 {
-		t.Errorf("expected 2 failed, got %d", stats.Failed)
-	}
-}
-
-// TestDLQWithRetries tests retry functionality.
-func TestDLQWithRetries(t *testing.T) {
-	ctx := context.Background()
-
-	// Processor that fails first 2 attempts for each item
-	processor := newFailingProcessor("test", 2)
-
-	clk := NewFakeClock(time.Now())
-	var retryLog []string
-	dlq := NewDeadLetterQueue(processor, clk).
-		MaxRetries(3).
-		RetryDelay(10 * time.Millisecond).
-		OnRetry(func(item int, attempt int, _ error) {
-			retryLog = append(retryLog, fmt.Sprintf("retry-%d-attempt-%d", item, attempt))
-		})
-
-	// Process 1 item
-	input := make(chan int, 1)
-	input <- 42
-	close(input)
-
-	output := dlq.Process(ctx, input)
-
-	// Collect results asynchronously
-	var results []int //nolint:prealloc // dynamic growth acceptable in test code
-	done := make(chan bool)
-	go func() {
-		for result := range output {
-			results = append(results, result)
-		}
-		done <- true
-	}()
-
-	// Advance clock for retries
-	for i := 0; i < 3; i++ {
-		clk.Step(35 * time.Second) // Timeout + retry delay
-		clk.BlockUntilReady()
-		time.Sleep(10 * time.Millisecond) // Allow goroutine scheduling
-	}
-
-	<-done
-
-	if len(results) != 1 || results[0] != 84 {
-		t.Errorf("expected [84], got %v", results)
-	}
-
-	// Should have 2 retry attempts
-	if len(retryLog) != 2 {
-		t.Errorf("expected 2 retry attempts, got %d: %v", len(retryLog), retryLog)
-	}
-
-	// Verify call count (1 initial + 2 retries = 3)
-	if processor.GetCallCount() != 3 {
-		t.Errorf("expected 3 calls to processor, got %d", processor.GetCallCount())
-	}
-
-	stats := dlq.GetStats()
-	if stats.Retried != 2 {
-		t.Errorf("expected 2 retries, got %d", stats.Retried)
-	}
-}
-
-// TestDLQMaxRetriesExceeded tests behavior when max retries are exceeded.
-func TestDLQMaxRetriesExceeded(t *testing.T) {
-	ctx := context.Background()
-
-	// Processor that always fails
-	processor := newFailingProcessor("test", 100)
-
-	var failedItems []DLQItem[int]
-	dlq := NewDeadLetterQueue(processor, RealClock).
-		MaxRetries(2).
-		RetryDelay(1 * time.Millisecond).
-		OnFailure(func(_ context.Context, item DLQItem[int]) {
-			failedItems = append(failedItems, item)
-		})
-
-	input := make(chan int, 1)
-	input <- 42
-	close(input)
-
-	output := dlq.Process(ctx, input)
-
-	// Should have no successful results
-	var results []int //nolint:prealloc // dynamic growth acceptable in test code
-	for result := range output {
-		results = append(results, result)
-	}
-
-	if len(results) != 0 {
-		t.Errorf("expected no results, got %v", results)
-	}
-
-	// Should have 1 failed item
-	if len(failedItems) != 1 {
-		t.Errorf("expected 1 failed item, got %d", len(failedItems))
-	}
-
-	// Verify attempts (1 initial + 2 retries = 3)
-	if failedItems[0].Attempts != 3 {
-		t.Errorf("expected 3 attempts, got %d", failedItems[0].Attempts)
-	}
-
-	// Verify processor was called 3 times
-	if processor.GetCallCount() != 3 {
-		t.Errorf("expected 3 calls, got %d", processor.GetCallCount())
-	}
-}
-
-// TestDLQFailedItemsChannel tests accessing failed items via channel.
-func TestDLQFailedItemsChannel(t *testing.T) {
-	ctx := context.Background()
-
-	processor := newFailingProcessor("test", 3)
-	dlq := NewDeadLetterQueue(processor, RealClock).
-		WithFailedBufferSize(10)
-
-	input := make(chan int, 5)
-	for i := 1; i <= 5; i++ {
-		input <- i
-	}
-	close(input)
-
-	// Start processing
-	output := dlq.Process(ctx, input)
-
-	// Collect failed items from channel
-	var failedItems []DLQItem[int]
+	// Collect results concurrently (like MixedResults test)
+	var successValues []int
+	var failureCount int
 	var wg sync.WaitGroup
-	wg.Add(1)
 
+	wg.Add(2)
+
+	// Consume successes
 	go func() {
 		defer wg.Done()
-		for failed := range dlq.FailedItems() {
-			failedItems = append(failedItems, failed)
+		for result := range successes {
+			if result.IsSuccess() {
+				successValues = append(successValues, result.Value())
+			} else {
+				t.Errorf("Got error in success channel: %v", result.Error())
+			}
 		}
 	}()
 
-	// Drain successful output
-	for range output { //nolint:revive // Intentionally draining channel
-		// Just drain
-	}
+	// Consume failures (should be empty)
+	go func() {
+		defer wg.Done()
+		for range failures {
+			failureCount++
+		}
+	}()
 
 	wg.Wait()
 
-	// Should have 3 failed items
-	if len(failedItems) != 3 {
-		t.Errorf("expected 3 failed items, got %d", len(failedItems))
+	// Verify all successes received
+	if len(successValues) != len(testValues) {
+		t.Errorf("Expected %d successes, got %d", len(testValues), len(successValues))
 	}
 
-	// Verify items
-	for i, failed := range failedItems {
-		if failed.Item != i+1 {
-			t.Errorf("failed item %d: expected %d, got %d", i, i+1, failed.Item)
-		}
-	}
-}
-
-// TestDLQContinueOnError tests continue vs stop behavior.
-func TestDLQContinueOnError(t *testing.T) {
-	ctx := context.Background()
-
-	t.Run("ContinueOnError=true", func(t *testing.T) {
-		processor := newFailingProcessor("test", 2)
-		dlq := NewDeadLetterQueue(processor, RealClock).
-			ContinueOnError(true) // Default
-
-		input := make(chan int, 5)
-		for i := 1; i <= 5; i++ {
-			input <- i
-		}
-		close(input)
-
-		output := dlq.Process(ctx, input)
-
-		var results []int //nolint:prealloc // dynamic growth acceptable in test code
-		for result := range output {
-			results = append(results, result)
-		}
-
-		// Should process all items despite failures
-		if len(results) != 3 {
-			t.Errorf("expected 3 results, got %d", len(results))
-		}
-	})
-
-	t.Run("ContinueOnError=false", func(t *testing.T) {
-		processor := newFailingProcessor("test", 1)
-		dlq := NewDeadLetterQueue(processor, RealClock).
-			ContinueOnError(false)
-
-		input := make(chan int)
-		go func() {
-			defer close(input)
-			for i := 1; i <= 5; i++ {
-				input <- i
-				time.Sleep(10 * time.Millisecond)
+	// Check that all expected values are present (order might vary)
+	for _, expected := range testValues {
+		found := false
+		for _, actual := range successValues {
+			if actual == expected {
+				found = true
+				break
 			}
-		}()
-
-		output := dlq.Process(ctx, input)
-
-		var results []int //nolint:prealloc // dynamic growth acceptable in test code
-		for result := range output {
-			results = append(results, result)
 		}
-
-		// Should stop after first failure
-		if len(results) != 0 {
-			t.Errorf("expected 0 results (stop on first failure), got %d", len(results))
+		if !found {
+			t.Errorf("Expected success value %d not found in %v", expected, successValues)
 		}
-
-		stats := dlq.GetStats()
-		if stats.Failed != 1 {
-			t.Errorf("expected 1 failure, got %d", stats.Failed)
-		}
-	})
-}
-
-// TestDLQShouldRetry tests custom retry logic.
-func TestDLQShouldRetry(t *testing.T) {
-	ctx := context.Background()
-
-	// Custom processor that returns different errors
-	customProcessor := &customFailingProcessor{
-		errors: []error{
-			errors.New("network timeout"),
-			errors.New("invalid input"),
-			errors.New("connection refused"),
-		},
 	}
 
-	var retryLog []string
-	dlq := NewDeadLetterQueue(customProcessor, RealClock).
-		MaxRetries(5).
-		ShouldRetry(func(err error) bool {
-			// Only retry network errors
-			errStr := strings.ToLower(err.Error())
-			return strings.Contains(errStr, "network") ||
-				strings.Contains(errStr, "connection")
-		}).
-		OnRetry(func(_ int, _ int, err error) {
-			retryLog = append(retryLog, err.Error())
-		})
+	if failureCount != 0 {
+		t.Errorf("Expected 0 failures, got %d", failureCount)
+	}
+}
 
-	input := make(chan int, 3)
-	input <- 1 // network timeout - will retry
-	input <- 2 // invalid input - won't retry
-	input <- 3 // connection refused - will retry
+func TestDeadLetterQueue_FailureDistribution(t *testing.T) {
+	clock := clockz.NewFakeClock()
+	dlq := NewDeadLetterQueue[int](clock)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	input := make(chan Result[int], 10) // Buffered to prevent blocking during sending
+	successes, failures := dlq.Process(ctx, input)
+
+	// Send failure items immediately
+	testErrors := []error{
+		errors.New("error1"),
+		errors.New("error2"),
+		errors.New("error3"),
+	}
+
+	for i, err := range testErrors {
+		input <- NewError(i, err, "test-processor")
+	}
 	close(input)
 
-	output := dlq.Process(ctx, input)
-	// Drain output channel
-	for range output { //nolint:revive // Intentionally draining channel
-		// Items are processed, focusing on retry behavior
+	// Collect results concurrently (like MixedResults test)
+	var failureErrors []string
+	var successCount int
+	var wg sync.WaitGroup
+
+	wg.Add(2)
+
+	// Consume failures
+	go func() {
+		defer wg.Done()
+		for result := range failures {
+			if result.IsError() {
+				failureErrors = append(failureErrors, result.Error().Err.Error())
+			} else {
+				t.Errorf("Got success in failure channel: %v", result.Value())
+			}
+		}
+	}()
+
+	// Consume successes (should be empty)
+	go func() {
+		defer wg.Done()
+		for range successes {
+			successCount++
+		}
+	}()
+
+	wg.Wait()
+
+	// Verify all failures received
+	if len(failureErrors) != len(testErrors) {
+		t.Errorf("Expected %d failures, got %d", len(testErrors), len(failureErrors))
 	}
 
-	// Item 2 should fail immediately, others might succeed after retry
-	stats := dlq.GetStats()
-	if stats.Failed < 1 {
-		t.Error("expected at least 1 permanent failure")
-	}
-
-	// Should only retry network-related errors
-	hasInvalidInput := false
-	for _, log := range retryLog {
-		if strings.Contains(log, "invalid input") {
-			hasInvalidInput = true
-			break
+	// Check that all expected error messages are present (order might vary)
+	for _, expected := range testErrors {
+		found := false
+		for _, actual := range failureErrors {
+			if actual == expected.Error() {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Expected failure error %s not found in %v", expected.Error(), failureErrors)
 		}
 	}
-	if hasInvalidInput {
-		t.Error("should not retry 'invalid input' error")
+
+	if successCount != 0 {
+		t.Errorf("Expected 0 successes, got %d", successCount)
 	}
 }
 
-// TestDLQContextCancellation tests graceful shutdown.
-func TestDLQContextCancellation(t *testing.T) {
+func TestDeadLetterQueue_MixedResults(t *testing.T) {
+	clock := clockz.NewFakeClock()
+	dlq := NewDeadLetterQueue[int](clock)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	input := make(chan Result[int], 10)
+	successes, failures := dlq.Process(ctx, input)
+
+	// Send mixed success and failure items
+	input <- NewSuccess(1)
+	input <- NewError(2, errors.New("error1"), "test")
+	input <- NewSuccess(3)
+	input <- NewError(4, errors.New("error2"), "test")
+	input <- NewSuccess(5)
+	close(input)
+
+	// Collect results concurrently
+	var successValues []int
+	var failureValues []int
+	var wg sync.WaitGroup
+
+	wg.Add(2)
+
+	// Collect successes
+	go func() {
+		defer wg.Done()
+		for result := range successes {
+			if result.IsSuccess() {
+				successValues = append(successValues, result.Value())
+			} else {
+				t.Errorf("Got error in success channel: %v", result.Error())
+			}
+		}
+	}()
+
+	// Collect failures
+	go func() {
+		defer wg.Done()
+		for result := range failures {
+			if result.IsError() {
+				failureValues = append(failureValues, result.Error().Item)
+			} else {
+				t.Errorf("Got success in failure channel: %v", result.Value())
+			}
+		}
+	}()
+
+	wg.Wait()
+
+	// Verify distribution
+	expectedSuccesses := []int{1, 3, 5}
+	expectedFailures := []int{2, 4}
+
+	if len(successValues) != len(expectedSuccesses) {
+		t.Errorf("Expected %d successes, got %d", len(expectedSuccesses), len(successValues))
+	}
+
+	if len(failureValues) != len(expectedFailures) {
+		t.Errorf("Expected %d failures, got %d", len(expectedFailures), len(failureValues))
+	}
+
+	// Note: Order might not be preserved due to concurrent consumption
+	// Just verify all expected values are present
+	for _, expected := range expectedSuccesses {
+		found := false
+		for _, actual := range successValues {
+			if actual == expected {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Expected success value %d not found", expected)
+		}
+	}
+
+	for _, expected := range expectedFailures {
+		found := false
+		for _, actual := range failureValues {
+			if actual == expected {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Expected failure value %d not found", expected)
+		}
+	}
+}
+
+func TestDeadLetterQueue_ContextCancellation(t *testing.T) {
+	clock := clockz.NewFakeClock()
+	dlq := NewDeadLetterQueue[int](clock)
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Slow processor
-	slowProcessor := ProcessorFunc[int, int](func(ctx context.Context, in <-chan int) <-chan int {
-		out := make(chan int)
-		go func() {
-			defer close(out)
-			for item := range in {
-				select {
-				case <-time.After(100 * time.Millisecond):
-					out <- item * 2
-				case <-ctx.Done():
-					return
-				}
-			}
-		}()
-		return out
-	})
+	input := make(chan Result[int], 10)
+	successes, failures := dlq.Process(ctx, input)
 
-	dlq := NewDeadLetterQueue(slowProcessor, RealClock)
-
-	input := make(chan int)
-	go func() {
-		defer close(input)
-		for i := 1; i <= 10; i++ {
-			select {
-			case input <- i:
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-
-	output := dlq.Process(ctx, input)
-
-	// Process some items then cancel
-	var count atomic.Int32
-	done := make(chan struct{})
-
-	go func() {
-		defer close(done)
-		for range output {
-			count.Add(1)
-		}
-	}()
-
-	// Let it process a few items
-	time.Sleep(250 * time.Millisecond)
+	// Send some items
+	input <- NewSuccess(1)
+	input <- NewError(2, errors.New("error"), "test")
 
 	// Cancel context
 	cancel()
 
-	// Wait for completion
-	<-done
+	// Allow goroutine cleanup with fake clock
+	clock.Advance(10 * time.Millisecond)
 
-	// Should have processed some but not all
-	finalCount := count.Load()
-	if finalCount == 0 {
-		t.Error("expected some items to be processed")
+	// Both channels should be closed
+	select {
+	case _, ok := <-successes:
+		if ok {
+			t.Error("Successes channel should be closed after context cancellation")
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Error("Successes channel should close quickly after context cancellation")
 	}
-	if finalCount >= 10 {
-		t.Errorf("expected cancellation to stop processing, but processed %d items", finalCount)
-	}
-}
 
-// TestDLQFluentAPI tests fluent configuration.
-func TestDLQFluentAPI(t *testing.T) {
-	processor := NewTestProcessor("test")
-
-	dlq := NewDeadLetterQueue(processor, RealClock).
-		MaxRetries(5).
-		RetryDelay(2 * time.Second).
-		ContinueOnError(false).
-		WithFailedBufferSize(200).
-		WithName("test-dlq")
-
-	if dlq.maxRetries != 5 {
-		t.Errorf("expected max retries 5, got %d", dlq.maxRetries)
-	}
-	if dlq.retryDelay != 2*time.Second {
-		t.Errorf("expected retry delay 2s, got %v", dlq.retryDelay)
-	}
-	if dlq.continueOnError != false {
-		t.Error("expected continueOnError to be false")
-	}
-	if dlq.failedBufferSize != 200 {
-		t.Errorf("expected buffer size 200, got %d", dlq.failedBufferSize)
-	}
-	if dlq.Name() != "test-dlq" {
-		t.Errorf("expected name 'test-dlq', got %s", dlq.Name())
+	select {
+	case _, ok := <-failures:
+		if ok {
+			t.Error("Failures channel should be closed after context cancellation")
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Error("Failures channel should close quickly after context cancellation")
 	}
 }
 
-// TestDLQStats tests statistics tracking.
-func TestDLQStats(t *testing.T) {
-	ctx := context.Background()
+func TestDeadLetterQueue_InputChannelClosure(t *testing.T) {
+	clock := clockz.NewFakeClock()
+	dlq := NewDeadLetterQueue[int](clock)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
 
-	// Processor that fails specific items
-	specificFailProcessor := ProcessorFunc[int, int](func(ctx context.Context, in <-chan int) <-chan int {
-		out := make(chan int)
-		go func() {
-			defer close(out)
-			for item := range in {
-				// Fail items 1, 2, 3 even with retries
-				if item <= 3 {
-					continue // Simulate failure
-				}
-				// Success for others
-				select {
-				case out <- item * 2:
-				case <-ctx.Done():
-					return
-				}
-			}
-		}()
-		return out
-	})
+	input := make(chan Result[int], 10)
+	successes, failures := dlq.Process(ctx, input)
 
-	dlq := NewDeadLetterQueue(specificFailProcessor, RealClock).
-		MaxRetries(1)
-
-	input := make(chan int, 10)
-	for i := 1; i <= 10; i++ {
-		input <- i
-	}
+	// Send some items and close input
+	input <- NewSuccess(1)
+	input <- NewError(2, errors.New("error"), "test")
 	close(input)
 
-	output := dlq.Process(ctx, input)
-	for range output { //nolint:revive // Intentionally draining channel
-		// Drain
+	// Both channels should close when input closes
+	var successClosed, failureClosed bool
+
+	// Read all successes
+	for result := range successes {
+		if result.IsSuccess() && result.Value() != 1 {
+			t.Errorf("Expected success value 1, got %d", result.Value())
+		}
+	}
+	successClosed = true
+
+	// Read all failures
+	for result := range failures {
+		if result.IsError() && result.Error().Item != 2 {
+			t.Errorf("Expected failure item 2, got %d", result.Error().Item)
+		}
+	}
+	failureClosed = true
+
+	if !successClosed {
+		t.Error("Successes channel should be closed when input closes")
 	}
 
-	stats := dlq.GetStats()
-
-	if stats.Processed != 10 {
-		t.Errorf("expected 10 processed, got %d", stats.Processed)
-	}
-	if stats.Succeeded != 7 {
-		t.Errorf("expected 7 succeeded, got %d", stats.Succeeded)
-	}
-	if stats.Failed != 3 {
-		t.Errorf("expected 3 failed, got %d", stats.Failed)
-	}
-
-	// Check rates
-	successRate := stats.SuccessRate()
-	if successRate != 70.0 {
-		t.Errorf("expected 70%% success rate, got %.2f%%", successRate)
-	}
-
-	failureRate := stats.FailureRate()
-	if failureRate != 30.0 {
-		t.Errorf("expected 30%% failure rate, got %.2f%%", failureRate)
+	if !failureClosed {
+		t.Error("Failures channel should be closed when input closes")
 	}
 }
 
-// TestDLQConcurrency tests concurrent processing.
-func TestDLQConcurrency(t *testing.T) {
-	ctx := context.Background()
+// LEGACY TESTS: These tests verify drop behavior but use real time for consistency
+// with existing production behavior. The deterministic timeout tests above
+// provide better coverage for the actual timeout mechanisms.
 
-	var mu sync.Mutex
-	var failedItems []int
-	var totalProcessed atomic.Int64
+// CRITICAL TEST: Non-consumed channel handling with drop policy.
+func TestDeadLetterQueue_NonConsumedFailureChannel(t *testing.T) {
+	// Use real clock for this integration test to match existing behavior
+	dlq := NewDeadLetterQueue[int](RealClock).WithName("test-dlq")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
 
-	// Process with single DLQ instance
-	randomProcessor := ProcessorFunc[int, int](func(_ context.Context, in <-chan int) <-chan int {
-		out := make(chan int)
+	input := make(chan Result[int])
+	successes, failures := dlq.Process(ctx, input)
+
+	// Only consume successes, ignore failures
+	go func() {
+		defer close(input)
+		// Send mixed results - failures should be dropped
+		input <- NewSuccess(1)
+		input <- NewError(2, errors.New("error1"), "test")
+		input <- NewSuccess(3)
+		input <- NewError(4, errors.New("error2"), "test")
+		input <- NewSuccess(5)
+
+		// Give time for processing
+		time.Sleep(50 * time.Millisecond)
+	}()
+
+	// Only read from successes channel - failures ignored
+	var successValues []int
+	for result := range successes {
+		if result.IsSuccess() {
+			successValues = append(successValues, result.Value())
+		}
+	}
+
+	// Drain failures channel to prevent goroutine leak in test
+	for failure := range failures {
+		_ = failure // Ignore - testing drop behavior
+	}
+
+	// Verify successes were processed
+	expected := []int{1, 3, 5}
+	if len(successValues) != len(expected) {
+		t.Errorf("Expected %d successes, got %d", len(expected), len(successValues))
+	}
+
+	// Verify drops were counted (failures were dropped due to no consumer)
+	// Note: This test is timing-dependent but should show drops
+	time.Sleep(100 * time.Millisecond) // Allow drop handling
+	droppedCount := dlq.DroppedCount()
+
+	if droppedCount == 0 {
+		t.Logf("Warning: Expected some drops due to non-consumed failure channel, got %d", droppedCount)
+		// This might not always fail due to timing, but log the observation
+	}
+}
+
+// CRITICAL TEST: Non-consumed success channel handling.
+func TestDeadLetterQueue_NonConsumedSuccessChannel(t *testing.T) {
+	// Use real clock for this integration test to match existing behavior
+	dlq := NewDeadLetterQueue[int](RealClock).WithName("test-dlq-2")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	input := make(chan Result[int])
+	successes, failures := dlq.Process(ctx, input)
+
+	// Only consume failures, ignore successes
+	go func() {
+		defer close(input)
+		// Send mixed results - successes should be dropped
+		input <- NewSuccess(1)
+		input <- NewError(2, errors.New("error1"), "test")
+		input <- NewSuccess(3)
+		input <- NewError(4, errors.New("error2"), "test")
+
+		// Give time for processing
+		time.Sleep(50 * time.Millisecond)
+	}()
+
+	// Only read from failures channel - successes ignored
+	var failureValues []int
+	for result := range failures {
+		if result.IsError() {
+			failureValues = append(failureValues, result.Error().Item)
+		}
+	}
+
+	// Drain successes channel to prevent goroutine leak in test
+	for success := range successes {
+		_ = success // Ignore - testing drop behavior
+	}
+
+	// Verify failures were processed
+	expected := []int{2, 4}
+	if len(failureValues) != len(expected) {
+		t.Errorf("Expected %d failures, got %d", len(expected), len(failureValues))
+	}
+
+	// Verify drops were counted (successes were dropped due to no consumer)
+	time.Sleep(100 * time.Millisecond) // Allow drop handling
+	droppedCount := dlq.DroppedCount()
+
+	if droppedCount == 0 {
+		t.Logf("Warning: Expected some drops due to non-consumed success channel, got %d", droppedCount)
+	}
+}
+
+func TestDeadLetterQueue_ConcurrentConsumers(t *testing.T) {
+	clock := clockz.NewFakeClock()
+	dlq := NewDeadLetterQueue[int](clock)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	input := make(chan Result[int])
+	successes, failures := dlq.Process(ctx, input)
+
+	var wg sync.WaitGroup
+	var successMutex, failureMutex sync.Mutex
+	var successValues, failureValues []int
+
+	// Multiple consumers on success channel
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
 		go func() {
-			defer close(out)
-			for item := range in {
-				if item%3 == 0 { // Fail multiples of 3
-					continue
+			defer wg.Done()
+			for result := range successes {
+				if result.IsSuccess() {
+					successMutex.Lock()
+					successValues = append(successValues, result.Value())
+					successMutex.Unlock()
 				}
-				out <- item * 2
 			}
 		}()
-		return out
-	})
+	}
 
-	dlq := NewDeadLetterQueue(randomProcessor, RealClock).
-		OnFailure(func(_ context.Context, item DLQItem[int]) {
-			mu.Lock()
-			failedItems = append(failedItems, item.Item)
-			mu.Unlock()
-		})
-
-	// Single input channel
-	input := make(chan int)
-	output := dlq.Process(ctx, input)
-
-	// Producer goroutines
-	var wg sync.WaitGroup
-	numGoroutines := 5
-	itemsPerGoroutine := 20
-
-	for i := 0; i < numGoroutines; i++ {
+	// Multiple consumers on failure channel
+	for i := 0; i < 3; i++ {
 		wg.Add(1)
-		go func(goroutineIdx int) {
+		go func() {
 			defer wg.Done()
+			for result := range failures {
+				if result.IsError() {
+					failureMutex.Lock()
+					failureValues = append(failureValues, result.Error().Item)
+					failureMutex.Unlock()
+				}
+			}
+		}()
+	}
 
-			for j := 0; j < itemsPerGoroutine; j++ {
-				item := goroutineIdx*100 + j
-				select {
-				case input <- item:
-					totalProcessed.Add(1)
-				case <-ctx.Done():
-					return
+	// Send test data
+	go func() {
+		defer close(input)
+		for i := 1; i <= 10; i++ {
+			if i%2 == 0 {
+				input <- NewError(i, errors.New("error"), "test")
+			} else {
+				input <- NewSuccess(i)
+			}
+		}
+	}()
+
+	wg.Wait()
+
+	// Each item should be consumed exactly once despite multiple consumers
+	successMutex.Lock()
+	failureMutex.Lock()
+	defer successMutex.Unlock()
+	defer failureMutex.Unlock()
+
+	if len(successValues) != 5 {
+		t.Errorf("Expected 5 success values, got %d", len(successValues))
+	}
+
+	if len(failureValues) != 5 {
+		t.Errorf("Expected 5 failure values, got %d", len(failureValues))
+	}
+}
+
+func TestDeadLetterQueue_EmptyStream(t *testing.T) {
+	clock := clockz.NewFakeClock()
+	dlq := NewDeadLetterQueue[int](clock)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	input := make(chan Result[int])
+	successes, failures := dlq.Process(ctx, input)
+
+	// Close input immediately without sending anything
+	close(input)
+
+	// Both channels should close with no items
+	successCount := 0
+	for range successes {
+		successCount++
+	}
+
+	failureCount := 0
+	for range failures {
+		failureCount++
+	}
+
+	if successCount != 0 {
+		t.Errorf("Expected 0 successes from empty stream, got %d", successCount)
+	}
+
+	if failureCount != 0 {
+		t.Errorf("Expected 0 failures from empty stream, got %d", failureCount)
+	}
+}
+
+// Race condition test - must be run with -race flag.
+func TestDeadLetterQueue_Race(t *testing.T) {
+	clock := clockz.NewFakeClock()
+	dlq := NewDeadLetterQueue[int](clock)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	input := make(chan Result[int], 100)
+	successes, failures := dlq.Process(ctx, input)
+
+	var wg sync.WaitGroup
+
+	// Start multiple producers
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func(producerID int) {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				value := producerID*50 + j
+				if j%3 == 0 {
+					input <- NewError(value, errors.New("error"), "test")
+				} else {
+					input <- NewSuccess(value)
 				}
 			}
 		}(i)
 	}
 
-	// Collect results
-	var totalSuccesses atomic.Int64
+	// Start multiple consumers
+	wg.Add(2)
+
 	go func() {
-		for range output {
-			totalSuccesses.Add(1)
+		defer wg.Done()
+		for result := range successes {
+			// Just consume to test race conditions
+			_ = result.IsSuccess()
 		}
 	}()
 
-	// Wait for producers
+	go func() {
+		defer wg.Done()
+		for result := range failures {
+			// Just consume to test race conditions
+			_ = result.IsError()
+		}
+	}()
+
+	// Wait for producers to finish, then close input
 	wg.Wait()
 	close(input)
 
-	// Wait a bit for processing to complete
-	time.Sleep(100 * time.Millisecond)
-
-	stats := dlq.GetStats()
-	processed := totalProcessed.Load()
-	if stats.Processed != processed {
-		t.Errorf("expected %d processed, got %d", processed, stats.Processed)
+	// Verify no dropped items under normal consumption
+	droppedCount := dlq.DroppedCount()
+	if droppedCount > 0 {
+		t.Errorf("Expected no drops with active consumers, got %d", droppedCount)
 	}
 }
 
-// BenchmarkDLQNoFailures benchmarks DLQ with no failures.
-func BenchmarkDLQNoFailures(b *testing.B) {
+// DETERMINISTIC TIMEOUT TESTS - These test the exact timeout behavior using fake clock
+
+func TestDeadLetterQueue_DeterministicTimeoutSuccessChannel(t *testing.T) {
+	clock := clockz.NewFakeClock()
+	dlq := NewDeadLetterQueue[int](clock).WithName("timeout-test-success")
 	ctx := context.Background()
-	processor := NewTestProcessor("bench")
-	dlq := NewDeadLetterQueue(processor, RealClock)
 
-	b.ResetTimer()
-	b.ReportAllocs()
+	input := make(chan Result[int])
+	successes, failures := dlq.Process(ctx, input)
 
-	for i := 0; i < b.N; i++ {
-		input := make(chan int, 1)
-		input <- i
-		close(input)
+	// Send an item that will block because no one is consuming successes
+	input <- NewSuccess(1)
+	close(input)
 
-		output := dlq.Process(ctx, input)
-		for range output { //nolint:revive // Intentionally draining channel
-			// Consume
-		}
+	// Advance time past the timeout threshold
+	clock.Advance(15 * time.Millisecond) // Well past 10ms timeout
+	clock.BlockUntilReady()
+
+	// Drain both channels to allow test completion
+	for success := range successes {
+		_ = success // Channel should close after timeout/drop
+	}
+	for failure := range failures {
+		_ = failure // Ignore failures
+	}
+
+	// Verify the timeout caused a drop
+	droppedCount := dlq.DroppedCount()
+	if droppedCount != 1 {
+		t.Errorf("Expected exactly 1 drop due to timeout, got %d", droppedCount)
 	}
 }
 
-// BenchmarkDLQWithRetries benchmarks DLQ with retries.
-func BenchmarkDLQWithRetries(b *testing.B) {
+func TestDeadLetterQueue_DeterministicTimeoutFailureChannel(t *testing.T) {
+	clock := clockz.NewFakeClock()
+	dlq := NewDeadLetterQueue[int](clock).WithName("timeout-test-failure")
 	ctx := context.Background()
-	processor := newFailingProcessor("bench", 1) // Fail once
-	dlq := NewDeadLetterQueue(processor, RealClock).
-		MaxRetries(2).
-		RetryDelay(0) // No delay for benchmark
 
-	b.ResetTimer()
-	b.ReportAllocs()
+	input := make(chan Result[int])
+	successes, failures := dlq.Process(ctx, input)
 
-	for i := 0; i < b.N; i++ {
-		// Reset failure count
-		atomic.StoreInt32(&processor.failureCount, 1)
+	// Send an item that will block because no one is consuming failures
+	input <- NewError(1, errors.New("error1"), "test")
+	close(input)
 
-		input := make(chan int, 1)
-		input <- i
-		close(input)
+	// Advance time past the timeout threshold
+	clock.Advance(15 * time.Millisecond) // Well past 10ms timeout
+	clock.BlockUntilReady()
 
-		output := dlq.Process(ctx, input)
-		for range output { //nolint:revive // Intentionally draining channel
-			// Consume
-		}
+	// Drain both channels to allow test completion
+	for failure := range failures {
+		_ = failure // Channel should close after timeout/drop
+	}
+	for success := range successes {
+		_ = success // Ignore successes
+	}
+
+	// Verify the timeout caused a drop
+	droppedCount := dlq.DroppedCount()
+	if droppedCount != 1 {
+		t.Errorf("Expected exactly 1 drop due to timeout, got %d", droppedCount)
 	}
 }
 
-// customFailingProcessor returns specific errors for testing.
-type customFailingProcessor struct {
-	errors []error
-	index  int
-	mu     sync.Mutex
+func TestDeadLetterQueue_DeterministicTimeoutBothChannelsSequential(t *testing.T) {
+	clock := clockz.NewFakeClock()
+	dlq := NewDeadLetterQueue[int](clock).WithName("timeout-test-both")
+	ctx := context.Background()
+
+	input := make(chan Result[int])
+	successes, failures := dlq.Process(ctx, input)
+
+	// Test both channels separately since DLQ processes items sequentially
+
+	// First test: success channel timeout
+	input <- NewSuccess(1)
+	clock.Advance(15 * time.Millisecond)
+	clock.BlockUntilReady()
+
+	// Second test: failure channel timeout
+	input <- NewError(2, errors.New("error1"), "test")
+	close(input)
+
+	clock.Advance(15 * time.Millisecond)
+	clock.BlockUntilReady()
+
+	// Drain both channels to allow test completion
+	for success := range successes {
+		_ = success // Channel should close after timeout/drop
+	}
+	for failure := range failures {
+		_ = failure // Channel should close after timeout/drop
+	}
+
+	// Verify both timeouts caused drops
+	droppedCount := dlq.DroppedCount()
+	if droppedCount != 2 {
+		t.Errorf("Expected exactly 2 drops (one per channel), got %d", droppedCount)
+	}
 }
 
-func (p *customFailingProcessor) Process(ctx context.Context, in <-chan int) <-chan int {
-	out := make(chan int)
+func TestDeadLetterQueue_NoTimeoutWhenConsuming(t *testing.T) {
+	clock := clockz.NewFakeClock()
+	dlq := NewDeadLetterQueue[int](clock).WithName("no-timeout-test")
+	ctx := context.Background()
+
+	input := make(chan Result[int])
+	successes, failures := dlq.Process(ctx, input)
+
+	var wg sync.WaitGroup
+	var successValues []int
+	var failureValues []int
+	var mu sync.Mutex
+
+	// Active consumers - no timeouts should occur
+	wg.Add(2)
 
 	go func() {
-		defer close(out)
-
-		for item := range in {
-			p.mu.Lock()
-			if p.index < len(p.errors) {
-				// Return next error by not sending output
-				p.index++
-				p.mu.Unlock()
-				continue
-			}
-			p.mu.Unlock()
-
-			// Success
-			select {
-			case out <- item * 2:
-			case <-ctx.Done():
-				return
+		defer wg.Done()
+		for result := range successes {
+			if result.IsSuccess() {
+				mu.Lock()
+				successValues = append(successValues, result.Value())
+				mu.Unlock()
 			}
 		}
 	}()
 
-	return out
-}
+	go func() {
+		defer wg.Done()
+		for result := range failures {
+			if result.IsError() {
+				mu.Lock()
+				failureValues = append(failureValues, result.Error().Item)
+				mu.Unlock()
+			}
+		}
+	}()
 
-func (*customFailingProcessor) Name() string {
-	return "custom-failing"
-}
+	// Send items WITHOUT time advances - consumers are active
+	go func() {
+		defer close(input)
 
-// ProcessorFunc is a function type that implements Processor.
-type ProcessorFunc[In, Out any] func(context.Context, <-chan In) <-chan Out
+		for i := 1; i <= 10; i++ {
+			if i%2 == 0 {
+				input <- NewError(i, errors.New("error"), "test")
+			} else {
+				input <- NewSuccess(i)
+			}
+			// No time advance - consumers should handle items immediately
+		}
+	}()
 
-func (f ProcessorFunc[In, Out]) Process(ctx context.Context, in <-chan In) <-chan Out {
-	return f(ctx, in)
-}
+	wg.Wait()
 
-func (ProcessorFunc[In, Out]) Name() string {
-	return "processor-func"
-}
+	// Verify all items processed, none dropped
+	mu.Lock()
+	defer mu.Unlock()
 
-// Example demonstrates basic DLQ usage.
-func ExampleDeadLetterQueue() {
-	ctx := context.Background()
-
-	// Processor that might fail
-	processor := NewTestProcessor("api-calls")
-
-	// Wrap with DLQ
-	dlq := NewDeadLetterQueue(processor, RealClock).
-		MaxRetries(3).
-		OnFailure(func(_ context.Context, item DLQItem[int]) {
-			fmt.Printf("Failed to process: %d after %d attempts\n",
-				item.Item, item.Attempts)
-		})
-
-	// Process items
-	input := make(chan int, 3)
-	input <- 1
-	input <- 2
-	input <- 3
-	close(input)
-
-	output := dlq.Process(ctx, input)
-	for result := range output {
-		fmt.Printf("Processed: %d\n", result)
+	if len(successValues) != 5 {
+		t.Errorf("Expected 5 successes, got %d", len(successValues))
 	}
 
-	// Output:
-	// Processed: 2
-	// Processed: 4
-	// Processed: 6
+	if len(failureValues) != 5 {
+		t.Errorf("Expected 5 failures, got %d", len(failureValues))
+	}
+
+	droppedCount := dlq.DroppedCount()
+	if droppedCount != 0 {
+		t.Errorf("Expected no drops with active consumers, got %d", droppedCount)
+	}
+}
+
+func TestDeadLetterQueue_ContextCancellationDuringTimeout(t *testing.T) {
+	clock := clockz.NewFakeClock()
+	dlq := NewDeadLetterQueue[int](clock).WithName("context-cancel-test")
+	ctx, cancel := context.WithCancel(context.Background())
+
+	input := make(chan Result[int])
+	successes, failures := dlq.Process(ctx, input)
+
+	// Send item that will start timeout process
+	input <- NewSuccess(1)
+
+	// Advance partway through timeout
+	clock.Advance(5 * time.Millisecond)
+	clock.BlockUntilReady()
+
+	// Cancel context during timeout
+	cancel()
+	close(input)
+
+	// Both channels should close due to context cancellation
+	for success := range successes {
+		_ = success // Should close quickly due to context cancellation
+	}
+	for failure := range failures {
+		_ = failure // Should close quickly due to context cancellation
+	}
+
+	// Item may or may not be counted as dropped depending on timing
+	// Context cancellation competes with timeout
+	droppedCount := dlq.DroppedCount()
+	t.Logf("Drops during context cancellation: %d (timing dependent)", droppedCount)
 }

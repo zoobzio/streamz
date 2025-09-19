@@ -2,683 +2,877 @@ package streamz
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"sort"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// TestSwitchBasicFunctionality tests basic switch operations.
-func TestSwitchBasicFunctionality(t *testing.T) {
-	ctx := context.Background()
+// Test domain types for comprehensive testing.
+type PaymentRoute string
 
-	// Create processors for each case.
-	evenProcessor := NewMapper(func(n int) int { return n * 2 }).WithName("even")
-	oddProcessor := NewMapper(func(n int) int { return n * 3 }).WithName("odd")
-	defaultProcessor := NewMapper(func(n int) int { return n + 100 }).WithName("default")
+const (
+	RouteStandard  PaymentRoute = "standard"
+	RouteHighValue PaymentRoute = "high_value"
+	RouteFraud     PaymentRoute = "fraud"
+)
 
-	// Create switch.
-	sw := NewSwitch[int]().
-		Case("even", func(n int) bool { return n%2 == 0 }, evenProcessor).
-		Case("odd", func(n int) bool { return n%2 == 1 }, oddProcessor).
-		Default(defaultProcessor)
-
-	// Process numbers.
-	input := make(chan int, 11)
-	for i := 0; i <= 10; i++ {
-		input <- i
-	}
-	close(input)
-
-	output := sw.Process(ctx, input)
-
-	// Collect results..
-	results := make(map[int]int)
-	for result := range output {
-		// Reverse engineer the input.
-		switch {
-		case result%2 == 0 && result < 100:
-			// Even case: result = input * 2.
-			results[result/2] = result
-		case result%3 == 0 && result < 100:
-			// Odd case: result = input * 3.
-			results[result/3] = result
-		case result > 100:
-			// Default case: result = input + 100.
-			results[result-100] = result
-		}
-	}
-
-	// Verify all inputs were processed.
-	if len(results) != 11 {
-		t.Errorf("expected 11 results, got %d", len(results))
-	}
-
-	// Verify correct routing.
-	//nolint:gocritic // Comments explain expected calculations
-	expectedResults := map[int]int{
-		0:  0,  // even: 0 * 2 = 0 //nolint:gocritic // calculation comment
-		1:  3,  // odd: 1 * 3 = 3 //nolint:gocritic // calculation comment
-		2:  4,  // even: 2 * 2 = 4 //nolint:gocritic // calculation comment
-		3:  9,  // odd: 3 * 3 = 9 //nolint:gocritic // calculation comment
-		4:  8,  // even: 4 * 2 = 8 //nolint:gocritic // calculation comment
-		5:  15, // odd: 5 * 3 = 15 //nolint:gocritic // calculation comment
-		6:  12, // even: 6 * 2 = 12 //nolint:gocritic // calculation comment
-		7:  21, // odd: 7 * 3 = 21 //nolint:gocritic // calculation comment
-		8:  16, // even: 8 * 2 = 16 //nolint:gocritic // calculation comment
-		9:  27, // odd: 9 * 3 = 27 //nolint:gocritic // calculation comment
-		10: 20, // even: 10 * 2 = 20 //nolint:gocritic // calculation comment
-	}
-
-	for input, expected := range expectedResults {
-		if results[input] != expected {
-			t.Errorf("input %d: expected %d, got %d", input, expected, results[input])
-		}
-	}
-
-	// Check statistics.
-	stats := sw.GetStats()
-	if stats.CaseMatches["even"] != 6 { // 0, 2, 4, 6, 8, 10
-		t.Errorf("expected 6 even matches, got %d", stats.CaseMatches["even"])
-	}
-	if stats.CaseMatches["odd"] != 5 { // 1, 3, 5, 7, 9
-		t.Errorf("expected 5 odd matches, got %d", stats.CaseMatches["odd"])
-	}
-	if stats.CaseMatches["_default"] != 0 {
-		t.Errorf("expected 0 default matches, got %d", stats.CaseMatches["_default"])
-	}
+type Payment struct {
+	Amount    float64
+	RiskScore float64
+	Currency  string
 }
 
-// TestSwitchFirstMatchWins tests that only the first matching case is executed.
-func TestSwitchFirstMatchWins(t *testing.T) {
-	ctx := context.Background()
-
-	var firstCaseCount, secondCaseCount atomic.Int32
-
-	// Create processors that track execution.
-	firstProcessor := ProcessorFunc[int, int](func(_ context.Context, in <-chan int) <-chan int {
-		out := make(chan int)
-		go func() {
-			defer close(out)
-			for item := range in {
-				firstCaseCount.Add(1)
-				out <- item * 10
-			}
-		}()
-		return out
-	})
-
-	secondProcessor := ProcessorFunc[int, int](func(_ context.Context, in <-chan int) <-chan int {
-		out := make(chan int)
-		go func() {
-			defer close(out)
-			for item := range in {
-				secondCaseCount.Add(1)
-				out <- item * 100
-			}
-		}()
-		return out
-	})
-
-	// Create switch with overlapping conditions.
-	sw := NewSwitch[int]().
-		Case("greater-than-5", func(n int) bool { return n > 5 }, firstProcessor).
-		Case("greater-than-3", func(n int) bool { return n > 3 }, secondProcessor)
-
-	// Process numbers
-	input := make(chan int, 10)
-	for i := 1; i <= 10; i++ {
-		input <- i
-	}
-	close(input)
-
-	output := sw.Process(ctx, input)
-
-	// Collect results.
-	var results []int //nolint:prealloc // dynamic growth acceptable in test code
-	for result := range output {
-		results = append(results, result)
-	}
-
-	// Numbers > 5 should go to first case.
-	// Numbers > 3 but <= 5 should go to second case.
-	// Numbers <= 3 should be dropped (no default).
-
-	if firstCaseCount.Load() != 5 { // 6, 7, 8, 9, 10
-		t.Errorf("expected 5 items in first case, got %d", firstCaseCount.Load())
-	}
-
-	if secondCaseCount.Load() != 2 { // 4, 5
-		t.Errorf("expected 2 items in second case, got %d", secondCaseCount.Load())
-	}
-
-	if len(results) != 7 { // Total items processed
-		t.Errorf("expected 7 results, got %d", len(results))
-	}
+type Order struct {
+	ID       string
+	Priority int
+	Value    float64
 }
 
-// TestSwitchDefaultCase tests default case handling.
-func TestSwitchDefaultCase(t *testing.T) {
-	ctx := context.Background()
-
-	// Processor for specific case.
-	multipleOfThree := NewMapper(func(n int) int { return n * 10 })
-
-	// Default processor.
-	defaultProc := NewMapper(func(n int) int { return n + 1000 })
-
-	// Switch with specific case and default.
-	sw := NewSwitch[int]().
-		Case("multiple-of-3", func(n int) bool { return n%3 == 0 }, multipleOfThree).
-		Default(defaultProc)
-
-	// Process numbers
-	input := make(chan int, 10)
-	for i := 1; i <= 10; i++ {
-		input <- i
-	}
-	close(input)
-
-	output := sw.Process(ctx, input)
-
-	// Collect and categorize results.
-	var multiplesOfThree, defaults []int
-	for result := range output {
-		if result < 100 {
-			multiplesOfThree = append(multiplesOfThree, result/10)
-		} else {
-			defaults = append(defaults, result-1000)
+func TestSwitch_BasicRouting(t *testing.T) {
+	predicate := func(payment Payment) PaymentRoute {
+		if payment.Amount > 10000 {
+			return RouteHighValue
 		}
-	}
-
-	// Verify routing.
-	expectedMultiples := []int{3, 6, 9}
-	if len(multiplesOfThree) != len(expectedMultiples) {
-		t.Errorf("expected %d multiples of 3, got %d", len(expectedMultiples), len(multiplesOfThree))
-	}
-
-	expectedDefaults := []int{1, 2, 4, 5, 7, 8, 10}
-	if len(defaults) != len(expectedDefaults) {
-		t.Errorf("expected %d defaults, got %d", len(expectedDefaults), len(defaults))
-	}
-
-	// Check stats.
-	stats := sw.GetStats()
-	if stats.CaseMatches["multiple-of-3"] != 3 {
-		t.Errorf("expected 3 multiple-of-3 matches, got %d", stats.CaseMatches["multiple-of-3"])
-	}
-	if stats.CaseMatches["_default"] != 7 {
-		t.Errorf("expected 7 default matches, got %d", stats.CaseMatches["_default"])
-	}
-}
-
-// TestSwitchNoDefault tests behavior when no default is set.
-func TestSwitchNoDefault(t *testing.T) {
-	ctx := context.Background()
-
-	// Single case processor.
-	processor := NewMapper(func(n int) int { return n * 2 })
-
-	// Switch without default.
-	sw := NewSwitch[int]().
-		Case("even", func(n int) bool { return n%2 == 0 }, processor)
-
-	// Process numbers
-	input := make(chan int, 10)
-	for i := 1; i <= 10; i++ {
-		input <- i
-	}
-	close(input)
-
-	output := sw.Process(ctx, input)
-
-	// Collect results.
-	var results []int //nolint:prealloc // dynamic growth acceptable in test code
-	for result := range output {
-		results = append(results, result/2) // Reverse the multiplication
-	}
-
-	// Only even numbers should be processed.
-	if len(results) != 5 {
-		t.Errorf("expected 5 results (even numbers), got %d", len(results))
-	}
-
-	// Verify only even numbers were processed.
-	for _, n := range results {
-		if n%2 != 0 {
-			t.Errorf("unexpected odd number in results: %d", n)
+		if payment.RiskScore > 0.8 {
+			return RouteFraud
 		}
-	}
-}
-
-// TestSwitchConcurrentProcessing tests concurrent execution of cases.
-func TestSwitchConcurrentProcessing(t *testing.T) {
-	ctx := context.Background()
-
-	// Track concurrent execution.
-	var activeWorkers atomic.Int32
-	maxConcurrent := atomic.Int32{}
-
-	// Slow processor to test concurrency.
-	slowProcessor := ProcessorFunc[int, int](func(_ context.Context, in <-chan int) <-chan int {
-		out := make(chan int)
-		go func() {
-			defer close(out)
-			for item := range in {
-				current := activeWorkers.Add(1)
-
-				// Track max concurrent workers.
-				for {
-					maxVal := maxConcurrent.Load()
-					if current <= maxVal || maxConcurrent.CompareAndSwap(maxVal, current) {
-						break
-					}
-				}
-
-				// Simulate work.
-				time.Sleep(10 * time.Millisecond)
-
-				out <- item
-				activeWorkers.Add(-1)
-			}
-		}()
-		return out
-	})
-
-	// Create switch with multiple cases using same slow processor.
-	sw := NewSwitch[int]().
-		Case("low", func(n int) bool { return n < 10 }, slowProcessor).
-		Case("medium", func(n int) bool { return n >= 10 && n < 20 }, slowProcessor).
-		Case("high", func(n int) bool { return n >= 20 }, slowProcessor).
-		WithBufferSize(10)
-
-	// Send items from multiple ranges.
-	input := make(chan int)
-	go func() {
-		defer close(input)
-		for i := 0; i < 30; i++ {
-			input <- i
-		}
-	}()
-
-	output := sw.Process(ctx, input)
-
-	// Consume results.
-	count := 0
-	for range output {
-		count++
+		return RouteStandard
 	}
 
-	if count != 30 {
-		t.Errorf("expected 30 results, got %d", count)
-	}
+	sw := NewSwitchSimple(predicate)
 
-	// Should have had some concurrent processing.
-	if maxConcurrent.Load() < 2 {
-		t.Errorf("expected concurrent processing, max concurrent was %d", maxConcurrent.Load())
-	}
-}
-
-// TestSwitchContextCancellation tests graceful shutdown.
-func TestSwitchContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	// Slow processor.
-	slowProcessor := ProcessorFunc[int, int](func(ctx context.Context, in <-chan int) <-chan int {
-		out := make(chan int)
-		go func() {
-			defer close(out)
-			for item := range in {
-				select {
-				case <-time.After(50 * time.Millisecond):
-					out <- item * 2
-				case <-ctx.Done():
-					return
-				}
-			}
-		}()
-		return out
-	})
+	input := make(chan Result[Payment], 10)
+	_, errors := sw.Process(ctx, input)
 
-	sw := NewSwitch[int]().
-		Case("all", func(_ int) bool { return true }, slowProcessor)
+	// Add routes
+	standardCh := sw.AddRoute(RouteStandard)
+	highValueCh := sw.AddRoute(RouteHighValue)
+	fraudCh := sw.AddRoute(RouteFraud)
 
-	input := make(chan int)
-	go func() {
-		defer close(input)
-		for i := 0; i < 100; i++ {
-			select {
-			case input <- i:
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-
-	output := sw.Process(ctx, input)
-
-	// Process some items then cancel.
-	count := 0
-	done := make(chan struct{})
-
-	go func() {
-		defer close(done)
-		for range output {
-			count++
-		}
-	}()
-
-	// Let it process a few items.
-	time.Sleep(150 * time.Millisecond)
-
-	// Cancel context.
-	cancel()
-
-	// Wait for completion.
-	<-done
-
-	// Should have processed some but not all.
-	if count == 0 {
-		t.Error("expected some items to be processed")
-	}
-	if count >= 100 {
-		t.Errorf("expected cancellation to stop processing, but processed %d items", count)
-	}
-}
-
-// TestSwitchComplexConditions tests complex routing logic.
-func TestSwitchComplexConditions(t *testing.T) {
-	ctx := context.Background()
-
-	type Order struct {
-		ID       string
-		Amount   float64
-		Priority string
-		Country  string
-	}
-
-	// Different processors for different order types.
-	urgentProcessor := NewMapper(func(o Order) Order {
-		o.Priority = "processed-urgent"
-		return o
-	})
-
-	highValueProcessor := NewMapper(func(o Order) Order {
-		o.Priority = "processed-high-value"
-		return o
-	})
-
-	internationalProcessor := NewMapper(func(o Order) Order {
-		o.Priority = "processed-international"
-		return o
-	})
-
-	standardProcessor := NewMapper(func(o Order) Order {
-		o.Priority = "processed-standard"
-		return o
-	})
-
-	// Complex routing logic.
-	orderSwitch := NewSwitch[Order]().
-		Case("urgent", func(o Order) bool {
-			return o.Priority == "urgent" || o.Amount > 10000
-		}, urgentProcessor).
-		Case("high-value", func(o Order) bool {
-			return o.Amount > 5000
-		}, highValueProcessor).
-		Case("international", func(o Order) bool {
-			return o.Country != "US"
-		}, internationalProcessor).
-		Default(standardProcessor).
-		WithName("order-router")
-
-	// Test orders.
-	orders := []Order{
-		{ID: "1", Amount: 100, Priority: "urgent", Country: "US"},   // urgent
-		{ID: "2", Amount: 15000, Priority: "normal", Country: "US"}, // urgent (high amount)
-		{ID: "3", Amount: 7000, Priority: "normal", Country: "US"},  // high-value
-		{ID: "4", Amount: 100, Priority: "normal", Country: "UK"},   // international
-		{ID: "5", Amount: 100, Priority: "normal", Country: "US"},   // standard
-	}
-
-	input := make(chan Order, len(orders))
-	for _, order := range orders {
-		input <- order
-	}
+	// Send test payments
+	input <- NewSuccess(Payment{Amount: 100, RiskScore: 0.1, Currency: "USD"})   // Standard
+	input <- NewSuccess(Payment{Amount: 15000, RiskScore: 0.2, Currency: "USD"}) // High value
+	input <- NewSuccess(Payment{Amount: 500, RiskScore: 0.9, Currency: "USD"})   // Fraud
 	close(input)
 
-	output := orderSwitch.Process(ctx, input)
-
-	// Collect results.
-	results := make(map[string]string)
-	for order := range output {
-		results[order.ID] = order.Priority
-	}
-
-	// Verify routing.
-	expected := map[string]string{
-		"1": "processed-urgent",
-		"2": "processed-urgent",
-		"3": "processed-high-value",
-		"4": "processed-international",
-		"5": "processed-standard",
-	}
-
-	for id, expectedPriority := range expected {
-		if results[id] != expectedPriority {
-			t.Errorf("order %s: expected priority %s, got %s", id, expectedPriority, results[id])
+	// Verify routing
+	select {
+	case result := <-standardCh:
+		if !result.IsSuccess() {
+			t.Fatal("Expected success result")
 		}
+		payment := result.Value()
+		if payment.Amount != 100 {
+			t.Errorf("Expected amount 100, got %f", payment.Amount)
+		}
+		// Check metadata
+		if route, exists := result.GetMetadata("route"); !exists || route != RouteStandard {
+			t.Errorf("Expected route metadata %v, got %v", RouteStandard, route)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Timeout waiting for standard route")
 	}
 
-	// Check stats.
-	stats := orderSwitch.GetStats()
-	if stats.CaseMatches["urgent"] != 2 {
-		t.Errorf("expected 2 urgent matches, got %d", stats.CaseMatches["urgent"])
+	select {
+	case result := <-highValueCh:
+		if !result.IsSuccess() {
+			t.Fatal("Expected success result")
+		}
+		payment := result.Value()
+		if payment.Amount != 15000 {
+			t.Errorf("Expected amount 15000, got %f", payment.Amount)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Timeout waiting for high value route")
 	}
-	if stats.MatchRate("urgent") != 40.0 {
-		t.Errorf("expected 40%% urgent match rate, got %.2f%%", stats.MatchRate("urgent"))
+
+	select {
+	case result := <-fraudCh:
+		if !result.IsSuccess() {
+			t.Fatal("Expected success result")
+		}
+		payment := result.Value()
+		if payment.RiskScore != 0.9 {
+			t.Errorf("Expected risk score 0.9, got %f", payment.RiskScore)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Timeout waiting for fraud route")
+	}
+
+	// Verify routes exist via HasRoute
+	if !sw.HasRoute(RouteStandard) {
+		t.Error("Standard route should exist")
+	}
+	if !sw.HasRoute(RouteHighValue) {
+		t.Error("High value route should exist")
+	}
+	if !sw.HasRoute(RouteFraud) {
+		t.Error("Fraud route should exist")
+	}
+
+	// Verify error channel access
+	if sw.ErrorChannel() != errors {
+		t.Error("ErrorChannel() did not return the correct error channel")
 	}
 }
 
-// TestSwitchFluentAPI tests fluent configuration.
-func TestSwitchFluentAPI(t *testing.T) {
-	processor := NewMapper(func(n int) int { return n * 2 })
-
-	sw := NewSwitch[int]().
-		Case("case1", func(n int) bool { return n > 10 }, processor).
-		Case("case2", func(n int) bool { return n < 0 }, processor).
-		Default(processor).
-		WithBufferSize(100).
-		WithName("test-switch")
-
-	if sw.name != "test-switch" {
-		t.Errorf("expected name 'test-switch', got %s", sw.name)
+func TestSwitch_ErrorPassthrough(t *testing.T) {
+	predicate := func(_ Payment) PaymentRoute {
+		return RouteStandard
 	}
 
-	if sw.bufferSize != 100 {
-		t.Errorf("expected buffer size 100, got %d", sw.bufferSize)
-	}
+	sw := NewSwitchSimple(predicate)
 
-	if len(sw.cases) != 2 {
-		t.Errorf("expected 2 cases, got %d", len(sw.cases))
-	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	if sw.defaultProc == nil {
-		t.Error("expected default processor to be set")
-	}
-}
+	input := make(chan Result[Payment], 10)
+	_, errorCh := sw.Process(ctx, input)
 
-// TestSwitchEmptyInput tests handling of empty input.
-func TestSwitchEmptyInput(t *testing.T) {
-	ctx := context.Background()
-
-	processor := NewMapper(func(n int) int { return n * 2 })
-	sw := NewSwitch[int]().
-		Case("even", func(n int) bool { return n%2 == 0 }, processor)
-
-	input := make(chan int)
+	// Send error result
+	errorResult := NewError(Payment{Amount: 100}, errors.New("test error"), "upstream")
+	input <- errorResult
 	close(input)
 
-	output := sw.Process(ctx, input)
-
-	// Should complete without hanging.
-	count := 0
-	for range output {
-		count++
-	}
-
-	if count != 0 {
-		t.Errorf("expected 0 results from empty input, got %d", count)
+	// Verify error goes to error channel
+	select {
+	case result := <-errorCh:
+		if !result.IsError() {
+			t.Fatal("Expected error result")
+		}
+		if result.Error().Err.Error() != "test error" {
+			t.Errorf("Expected error message 'test error', got %s", result.Error().Err.Error())
+		}
+		// Check that processor metadata was added
+		if processor, exists := result.GetMetadata(MetadataProcessor); !exists || processor != "switch" {
+			t.Errorf("Expected processor metadata 'switch', got %v", processor)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Timeout waiting for error")
 	}
 }
 
-// TestSwitchStatsConcurrency tests thread-safe statistics.
-func TestSwitchStatsConcurrency(t *testing.T) {
-	ctx := context.Background()
+func TestSwitch_PredicatePanic(t *testing.T) {
+	predicate := func(payment Payment) PaymentRoute {
+		if payment.Amount == 0 {
+			panic("zero amount not allowed")
+		}
+		return RouteStandard
+	}
 
-	processor := NewMapper(func(n int) int { return n * 2 })
-	sw := NewSwitch[int]().
-		Case("even", func(n int) bool { return n%2 == 0 }, processor).
-		Case("odd", func(n int) bool { return n%2 == 1 }, processor)
+	sw := NewSwitchSimple(predicate)
 
-	// Process items concurrently.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	input := make(chan Result[Payment], 10)
+	_, errorCh := sw.Process(ctx, input)
+
+	// Send payment that will cause panic
+	input <- NewSuccess(Payment{Amount: 0, RiskScore: 0.1, Currency: "USD"})
+	close(input)
+
+	// Verify panic is recovered and sent to error channel
+	select {
+	case result := <-errorCh:
+		if !result.IsError() {
+			t.Fatal("Expected error result from panic")
+		}
+		errMsg := result.Error().Err.Error()
+		if !contains(errMsg, "predicate panic") || !contains(errMsg, "zero amount not allowed") {
+			t.Errorf("Expected panic error message, got: %s", errMsg)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Timeout waiting for panic error")
+	}
+}
+
+func TestSwitch_UnknownRoute(t *testing.T) {
+	// Test with default route
+	defaultKey := RouteStandard
+	config := SwitchConfig[PaymentRoute]{
+		BufferSize: 0,
+		DefaultKey: &defaultKey,
+	}
+
+	predicate := func(_ Payment) PaymentRoute {
+		// Return a route that doesn't exist
+		return PaymentRoute("unknown")
+	}
+
+	sw := NewSwitch(predicate, config)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	input := make(chan Result[Payment], 10)
+	_, _ = sw.Process(ctx, input)
+
+	// Add only the default route
+	defaultCh := sw.AddRoute(RouteStandard)
+
+	// Send payment that will route to unknown key
+	input <- NewSuccess(Payment{Amount: 100, RiskScore: 0.1, Currency: "USD"})
+	close(input)
+
+	// Verify it goes to default route
+	select {
+	case result := <-defaultCh:
+		if !result.IsSuccess() {
+			t.Fatal("Expected success result in default route")
+		}
+		payment := result.Value()
+		if payment.Amount != 100 {
+			t.Errorf("Expected amount 100, got %f", payment.Amount)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Timeout waiting for default route")
+	}
+
+	// Verify default route exists
+	if !sw.HasRoute(RouteStandard) {
+		t.Error("Default route should exist")
+	}
+}
+
+func TestSwitch_UnknownRouteDrop(t *testing.T) {
+	// Test without default route (should drop)
+	predicate := func(_ Payment) PaymentRoute {
+		// Return a route that doesn't exist
+		return PaymentRoute("unknown")
+	}
+
+	sw := NewSwitchSimple(predicate)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	input := make(chan Result[Payment], 10)
+	_, errorCh := sw.Process(ctx, input)
+
+	// Don't add any routes
+
+	// Send payment that will route to unknown key
+	input <- NewSuccess(Payment{Amount: 100, RiskScore: 0.1, Currency: "USD"})
+
+	// Verify nothing is sent anywhere (message is dropped)
+	select {
+	case <-errorCh:
+		t.Fatal("Unexpected message in error channel")
+	case <-time.After(50 * time.Millisecond):
+		// Expected - message should be dropped
+	}
+
+	close(input)
+}
+
+func TestSwitch_ConcurrentAccess(t *testing.T) {
+	predicate := func(order Order) int {
+		return order.Priority
+	}
+
+	sw := NewSwitchSimple(predicate)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	input := make(chan Result[Order], 100)
+	_, _ = sw.Process(ctx, input)
+
+	// Add routes concurrently
 	var wg sync.WaitGroup
 	numGoroutines := 10
-	itemsPerGoroutine := 100
 
 	for i := 0; i < numGoroutines; i++ {
 		wg.Add(1)
-		go func(offset int) {
+		go func(priority int) {
 			defer wg.Done()
+			sw.AddRoute(priority)
+		}(i)
+	}
 
-			input := make(chan int, itemsPerGoroutine)
-			for j := 0; j < itemsPerGoroutine; j++ {
-				input <- offset*itemsPerGoroutine + j
-			}
-			close(input)
-
-			output := sw.Process(ctx, input)
-			for range output { //nolint:revive // Intentionally draining channel
-				// Drain.
+	// Send orders concurrently
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(priority int) {
+			defer wg.Done()
+			for j := 0; j < 10; j++ {
+				order := Order{
+					ID:       fmt.Sprintf("order-%d-%d", priority, j),
+					Priority: priority,
+					Value:    float64(j * 100),
+				}
+				input <- NewSuccess(order)
 			}
 		}(i)
 	}
 
 	wg.Wait()
-
-	// Check total stats.
-	stats := sw.GetStats()
-	expectedTotal := int64(numGoroutines * itemsPerGoroutine)
-
-	if stats.TotalItems != expectedTotal {
-		t.Errorf("expected %d total items, got %d", expectedTotal, stats.TotalItems)
-	}
-
-	// Even and odd should be roughly equal.
-	evenCount := stats.CaseMatches["even"]
-	oddCount := stats.CaseMatches["odd"]
-
-	if evenCount+oddCount != expectedTotal {
-		t.Errorf("sum of cases (%d) doesn't match total (%d)", evenCount+oddCount, expectedTotal)
-	}
-}
-
-// BenchmarkSwitchTwoCases benchmarks switch with two cases.
-func BenchmarkSwitchTwoCases(b *testing.B) {
-	ctx := context.Background()
-
-	processor := NewMapper(func(n int) int { return n * 2 })
-	sw := NewSwitch[int]().
-		Case("even", func(n int) bool { return n%2 == 0 }, processor).
-		Case("odd", func(n int) bool { return n%2 == 1 }, processor)
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		input := make(chan int, 1)
-		input <- i
-		close(input)
-
-		output := sw.Process(ctx, input)
-		for range output { //nolint:revive // Intentionally draining channel
-			// Consume.
-		}
-	}
-}
-
-// BenchmarkSwitchManyCases benchmarks switch with many cases.
-func BenchmarkSwitchManyCases(b *testing.B) {
-	ctx := context.Background()
-
-	processor := NewMapper(func(n int) int { return n * 2 })
-	sw := NewSwitch[int]()
-
-	// Add 10 cases.
-	for i := 0; i < 10; i++ {
-		threshold := i * 10
-		caseThreshold := threshold // Capture in closure
-		sw.Case(fmt.Sprintf("case-%d", i), func(n int) bool {
-			return n > caseThreshold && n <= caseThreshold+10
-		}, processor)
-	}
-	sw.Default(processor)
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		input := make(chan int, 1)
-		input <- i % 100
-		close(input)
-
-		output := sw.Process(ctx, input)
-		for range output { //nolint:revive // Intentionally draining channel
-			// Consume.
-		}
-	}
-}
-
-// Example demonstrates basic switch usage.
-func ExampleSwitch() {
-	ctx := context.Background()
-
-	// Create processors for different cases.
-	smallProcessor := NewMapper(func(n int) int { return n + 10 })
-	mediumProcessor := NewMapper(func(n int) int { return n * 2 })
-	largeProcessor := NewMapper(func(n int) int { return n * 10 })
-
-	// Create switch based on value ranges.
-	sw := NewSwitch[int]().
-		Case("small", func(n int) bool { return n < 10 }, smallProcessor).
-		Case("medium", func(n int) bool { return n < 100 }, mediumProcessor).
-		Case("large", func(n int) bool { return n < 1000 }, largeProcessor).
-		WithName("size-router")
-
-	// Process values.
-	// Test cases:
-	// - 5: small processor (5 + 10 = 15)
-	// - 50: medium processor (50 * 2 = 100)
-	// - 500: large processor (500 * 10 = 5000)
-	// - 5000: no match, will be dropped
-	input := make(chan int, 4)
-	input <- 5
-	input <- 50
-	input <- 500
-	input <- 5000
 	close(input)
 
-	output := sw.Process(ctx, input)
-
-	var results []int //nolint:prealloc // dynamic growth acceptable in test code
-	for result := range output {
-		results = append(results, result)
+	// Verify all routes exist
+	keys := sw.RouteKeys()
+	if len(keys) != numGoroutines {
+		t.Errorf("Expected %d routes, got %d", numGoroutines, len(keys))
 	}
 
-	// Sort for consistent output.
-	sort.Ints(results)
-	fmt.Println(results)
-	// Output: [15 100 5000]
+	// Verify all routes exist
+	for i := 0; i < numGoroutines; i++ {
+		if !sw.HasRoute(i) {
+			t.Errorf("Route %d not found", i)
+		}
+	}
+}
+
+func TestSwitch_ContextCancellation(t *testing.T) {
+	predicate := func(_ Payment) PaymentRoute {
+		return RouteStandard
+	}
+
+	sw := NewSwitchSimple(predicate)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	input := make(chan Result[Payment], 10)
+	_, _ = sw.Process(ctx, input)
+
+	// Add route
+	standardCh := sw.AddRoute(RouteStandard)
+
+	// Send a payment
+	input <- NewSuccess(Payment{Amount: 100, RiskScore: 0.1, Currency: "USD"})
+
+	// Cancel context
+	cancel()
+
+	// Verify channel gets closed
+	select {
+	case _, ok := <-standardCh:
+		if ok {
+			// Should receive the payment first
+			select {
+			case _, ok := <-standardCh:
+				if ok {
+					t.Fatal("Channel should be closed after context cancellation")
+				}
+			case <-time.After(100 * time.Millisecond):
+				t.Fatal("Channel should be closed quickly after context cancellation")
+			}
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Should receive at least one message or closed channel")
+	}
+}
+
+func TestSwitch_MetadataPreservation(t *testing.T) {
+	predicate := func(_ Payment) PaymentRoute {
+		return RouteStandard
+	}
+
+	sw := NewSwitchSimple(predicate)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	input := make(chan Result[Payment], 10)
+	_, _ = sw.Process(ctx, input)
+
+	// Add route
+	standardCh := sw.AddRoute(RouteStandard)
+
+	// Send payment with existing metadata
+	originalResult := NewSuccess(Payment{Amount: 100, RiskScore: 0.1, Currency: "USD"}).
+		WithMetadata("custom", "value").
+		WithMetadata("source", "test")
+
+	input <- originalResult
+	close(input)
+
+	// Verify metadata is preserved and enhanced
+	select {
+	case result := <-standardCh:
+		// Check original metadata is preserved
+		if custom, exists := result.GetMetadata("custom"); !exists || custom != "value" {
+			t.Error("Original metadata not preserved")
+		}
+		if source, exists := result.GetMetadata("source"); !exists || source != "test" {
+			t.Error("Original metadata not preserved")
+		}
+
+		// Check switch metadata is added
+		if route, exists := result.GetMetadata("route"); !exists || route != RouteStandard {
+			t.Error("Route metadata not added")
+		}
+		if processor, exists := result.GetMetadata(MetadataProcessor); !exists || processor != "switch" {
+			t.Error("Processor metadata not added")
+		}
+		if _, exists := result.GetMetadata(MetadataTimestamp); !exists {
+			t.Error("Timestamp metadata not added")
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Timeout waiting for result")
+	}
+}
+
+func TestSwitch_ChannelBuffering(t *testing.T) {
+	predicate := func(_ Payment) PaymentRoute {
+		return RouteStandard
+	}
+
+	// Test buffered channels
+	config := SwitchConfig[PaymentRoute]{
+		BufferSize: 5,
+		DefaultKey: nil,
+	}
+
+	sw := NewSwitch(predicate, config)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	input := make(chan Result[Payment], 10)
+	_, _ = sw.Process(ctx, input)
+
+	// Add route
+	standardCh := sw.AddRoute(RouteStandard)
+
+	// Send multiple payments without reading
+	for i := 0; i < 5; i++ {
+		input <- NewSuccess(Payment{Amount: float64(i * 100), RiskScore: 0.1, Currency: "USD"})
+	}
+
+	// All should be buffered without blocking
+	close(input)
+
+	// Read all buffered payments
+	for i := 0; i < 5; i++ {
+		select {
+		case result := <-standardCh:
+			if !result.IsSuccess() {
+				t.Fatal("Expected success result")
+			}
+			payment := result.Value()
+			expectedAmount := float64(i * 100)
+			if payment.Amount != expectedAmount {
+				t.Errorf("Expected amount %f, got %f", expectedAmount, payment.Amount)
+			}
+		case <-time.After(100 * time.Millisecond):
+			t.Fatalf("Timeout waiting for payment %d", i)
+		}
+	}
+}
+
+func TestSwitch_RouteManagement(t *testing.T) {
+	predicate := func(order Order) int {
+		return order.Priority
+	}
+
+	sw := NewSwitchSimple(predicate)
+
+	// Test AddRoute
+	ch1 := sw.AddRoute(1)
+	if ch1 == nil {
+		t.Fatal("AddRoute returned nil channel")
+	}
+
+	// Test HasRoute
+	if !sw.HasRoute(1) {
+		t.Error("HasRoute should return true for added route")
+	}
+	if sw.HasRoute(2) {
+		t.Error("HasRoute should return false for non-existent route")
+	}
+
+	// Test RouteKeys
+	keys := sw.RouteKeys()
+	if len(keys) != 1 || keys[0] != 1 {
+		t.Errorf("Expected keys [1], got %v", keys)
+	}
+
+	// Add another route
+	_ = sw.AddRoute(2)
+	keys = sw.RouteKeys()
+	if len(keys) != 2 {
+		t.Errorf("Expected 2 keys, got %d", len(keys))
+	}
+
+	// Test that adding same route returns same channel
+	ch1Again := sw.AddRoute(1)
+	if ch1 != ch1Again {
+		t.Error("AddRoute should return same channel for existing route")
+	}
+
+	// Test RemoveRoute
+	if !sw.RemoveRoute(1) {
+		t.Error("RemoveRoute should return true for existing route")
+	}
+	if sw.HasRoute(1) {
+		t.Error("Route should not exist after removal")
+	}
+	if sw.RemoveRoute(1) {
+		t.Error("RemoveRoute should return false for non-existent route")
+	}
+
+	// Verify channel is closed after removal
+	select {
+	case _, ok := <-ch1:
+		if ok {
+			t.Error("Channel should be closed after route removal")
+		}
+	case <-time.After(10 * time.Millisecond):
+		t.Error("Channel should be closed immediately after route removal")
+	}
+
+	// Verify remaining route still exists
+	if !sw.HasRoute(2) {
+		t.Error("Remaining route should still exist")
+	}
+
+	keys = sw.RouteKeys()
+	if len(keys) != 1 || keys[0] != 2 {
+		t.Errorf("Expected keys [2], got %v", keys)
+	}
+}
+
+func TestSwitch_BackpressureIsolation(t *testing.T) {
+	predicate := func(order Order) int {
+		return order.Priority
+	}
+
+	sw := NewSwitchSimple(predicate)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	input := make(chan Result[Order], 10)
+	_, _ = sw.Process(ctx, input)
+
+	// Add two routes
+	ch1 := sw.AddRoute(1)
+	ch2 := sw.AddRoute(2)
+
+	// Send two messages to different routes
+	input <- NewSuccess(Order{ID: "1", Priority: 1, Value: 100})
+	input <- NewSuccess(Order{ID: "2", Priority: 2, Value: 200})
+
+	// Both channels should receive their messages independently
+	// Channel 1 should not block channel 2
+	var wg sync.WaitGroup
+	var order1, order2 Order
+	var success1, success2 bool
+
+	wg.Add(2)
+
+	// Read from channel 1
+	go func() {
+		defer wg.Done()
+		select {
+		case result := <-ch1:
+			if result.IsSuccess() {
+				order1 = result.Value()
+				success1 = true
+			}
+		case <-time.After(100 * time.Millisecond):
+			// timeout
+		}
+	}()
+
+	// Read from channel 2
+	go func() {
+		defer wg.Done()
+		select {
+		case result := <-ch2:
+			if result.IsSuccess() {
+				order2 = result.Value()
+				success2 = true
+			}
+		case <-time.After(100 * time.Millisecond):
+			// timeout
+		}
+	}()
+
+	wg.Wait()
+
+	// Verify both channels received their messages
+	if !success1 {
+		t.Fatal("Channel 1 should receive its message")
+	}
+	if !success2 {
+		t.Fatal("Channel 2 should receive its message")
+	}
+	if order1.ID != "1" {
+		t.Errorf("Expected order ID '1', got '%s'", order1.ID)
+	}
+	if order2.ID != "2" {
+		t.Errorf("Expected order ID '2', got '%s'", order2.ID)
+	}
+
+	close(input)
+}
+
+func TestSwitch_ChannelCleanup(t *testing.T) {
+	predicate := func(_ Payment) PaymentRoute {
+		return RouteStandard
+	}
+
+	sw := NewSwitchSimple(predicate)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	input := make(chan Result[Payment], 10)
+	_, errorCh := sw.Process(ctx, input)
+
+	// Add routes
+	standardCh := sw.AddRoute(RouteStandard)
+	highValueCh := sw.AddRoute(RouteHighValue)
+
+	// Close input to trigger cleanup
+	close(input)
+
+	// Verify all channels are closed
+	select {
+	case _, ok := <-standardCh:
+		if ok {
+			t.Error("Standard channel should be closed")
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Error("Standard channel should be closed")
+	}
+
+	select {
+	case _, ok := <-highValueCh:
+		if ok {
+			t.Error("High value channel should be closed")
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Error("High value channel should be closed")
+	}
+
+	select {
+	case _, ok := <-errorCh:
+		if ok {
+			t.Error("Error channel should be closed")
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Error("Error channel should be closed")
+	}
+
+	cancel() // cleanup
+}
+
+func TestSwitch_ErrorChannelInit(t *testing.T) {
+	predicate := func(_ Payment) PaymentRoute {
+		return RouteStandard
+	}
+
+	// Test unbuffered error channel
+	sw := NewSwitchSimple(predicate)
+	if sw.errorChan == nil {
+		t.Fatal("Error channel should be initialized")
+	}
+
+	// Test buffered error channel
+	config := SwitchConfig[PaymentRoute]{
+		BufferSize: 5,
+		DefaultKey: nil,
+	}
+	swBuffered := NewSwitch(predicate, config)
+	if swBuffered.errorChan == nil {
+		t.Fatal("Buffered error channel should be initialized")
+	}
+
+	// Verify error channel is accessible
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	input := make(chan Result[Payment], 1)
+	_, errorCh := sw.Process(ctx, input)
+
+	if errorCh != sw.ErrorChannel() {
+		t.Error("ErrorChannel() should return the same channel as Process")
+	}
+
+	close(input)
+}
+
+func TestSwitch_MetadataConstants(t *testing.T) {
+	predicate := func(_ Payment) PaymentRoute {
+		return RouteStandard
+	}
+
+	sw := NewSwitchSimple(predicate)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	input := make(chan Result[Payment], 10)
+	_, _ = sw.Process(ctx, input)
+
+	// Add route
+	standardCh := sw.AddRoute(RouteStandard)
+
+	// Send payment
+	input <- NewSuccess(Payment{Amount: 100, RiskScore: 0.1, Currency: "USD"})
+	close(input)
+
+	// Verify metadata constants are used correctly
+	select {
+	case result := <-standardCh:
+		// Check processor metadata uses constant
+		processor, exists := result.GetMetadata(MetadataProcessor)
+		if !exists {
+			t.Error("MetadataProcessor constant not used")
+		}
+		if processor != "switch" {
+			t.Errorf("Expected processor 'switch', got %v", processor)
+		}
+
+		// Check timestamp metadata uses constant
+		timestamp, exists := result.GetMetadata(MetadataTimestamp)
+		if !exists {
+			t.Error("MetadataTimestamp constant not used")
+		}
+		if _, ok := timestamp.(time.Time); !ok {
+			t.Errorf("Expected timestamp to be time.Time, got %T", timestamp)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Timeout waiting for result")
+	}
+}
+
+func TestSwitch_PaymentRouting(t *testing.T) {
+	predicate := func(payment Payment) PaymentRoute {
+		if payment.Amount > 10000 {
+			return RouteHighValue
+		}
+		if payment.RiskScore > 0.8 {
+			return RouteFraud
+		}
+		return RouteStandard
+	}
+
+	sw := NewSwitchSimple(predicate)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	input := make(chan Result[Payment], 10)
+	_, errorCh := sw.Process(ctx, input)
+
+	// Create test scenarios
+	testCases := []struct {
+		payment       Payment
+		expectedRoute PaymentRoute
+	}{
+		{Payment{Amount: 100, RiskScore: 0.1, Currency: "USD"}, RouteStandard},
+		{Payment{Amount: 15000, RiskScore: 0.2, Currency: "EUR"}, RouteHighValue},
+		{Payment{Amount: 500, RiskScore: 0.9, Currency: "GBP"}, RouteFraud},
+		{Payment{Amount: 25000, RiskScore: 0.95, Currency: "CAD"}, RouteHighValue}, // Amount takes precedence
+	}
+
+	// Add all routes
+	standardCh := sw.AddRoute(RouteStandard)
+	highValueCh := sw.AddRoute(RouteHighValue)
+	fraudCh := sw.AddRoute(RouteFraud)
+
+	// Send test payments
+	for _, tc := range testCases {
+		input <- NewSuccess(tc.payment)
+	}
+	close(input)
+
+	// Verify routing for each test case
+	receivedStandard := 0
+	receivedHighValue := 0
+	receivedFraud := 0
+
+	// Collect all results
+	collectionErrors := make(chan error, len(testCases))
+	done := make(chan bool)
+	go func() {
+		defer close(done)
+		for i := 0; i < len(testCases); i++ {
+			select {
+			case result := <-standardCh:
+				receivedStandard++
+				payment := result.Value()
+				if payment.Amount != 100 {
+					collectionErrors <- fmt.Errorf("Standard route: expected amount 100, got %f", payment.Amount)
+				}
+			case result := <-highValueCh:
+				receivedHighValue++
+				payment := result.Value()
+				if payment.Amount <= 10000 {
+					collectionErrors <- fmt.Errorf("High value route: expected amount > 10000, got %f", payment.Amount)
+				}
+			case result := <-fraudCh:
+				receivedFraud++
+				payment := result.Value()
+				if payment.RiskScore <= 0.8 {
+					collectionErrors <- fmt.Errorf("fraud route: expected risk score > 0.8, got %f", payment.RiskScore)
+				}
+			case <-time.After(100 * time.Millisecond):
+				collectionErrors <- fmt.Errorf("timeout waiting for result %d", i)
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+		// Check for any errors from goroutine
+		select {
+		case err := <-collectionErrors:
+			t.Fatal(err)
+		default:
+		}
+		// Verify counts
+		if receivedStandard != 1 {
+			t.Errorf("Expected 1 standard payment, got %d", receivedStandard)
+		}
+		if receivedHighValue != 2 {
+			t.Errorf("Expected 2 high value payments, got %d", receivedHighValue)
+		}
+		if receivedFraud != 1 {
+			t.Errorf("Expected 1 fraud payment, got %d", receivedFraud)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Timeout waiting for all results")
+	}
+
+	// Verify no errors
+	select {
+	case <-errorCh:
+		t.Error("Unexpected error received")
+	default:
+		// Expected - no errors
+	}
+
+	// Verify all routes exist
+	if !sw.HasRoute(RouteStandard) || !sw.HasRoute(RouteHighValue) || !sw.HasRoute(RouteFraud) {
+		t.Error("Not all expected routes exist")
+	}
+}
+
+// Helper function for string contains check.
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || substr == "" ||
+		(len(s) > len(substr) &&
+			(s[:len(substr)] == substr ||
+				s[len(s)-len(substr):] == substr ||
+				findSubstring(s, substr))))
+}
+
+func findSubstring(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }

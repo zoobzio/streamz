@@ -2,6 +2,8 @@
 
 Learn how to effectively test streamz processors and pipelines to ensure reliability and correctness.
 
+> 📖 **Note:** For comprehensive testing documentation including our testing architecture, quality standards, and contribution guidelines, see [TESTING.md](../../TESTING.md) in the project root.
+
 ## Testing Philosophy
 
 Stream processing systems have unique testing challenges:

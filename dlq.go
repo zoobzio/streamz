@@ -2,380 +2,161 @@ package streamz
 
 import (
 	"context"
-	"fmt"
-	"sync"
+	"log"
 	"sync/atomic"
 	"time"
 )
 
-// DLQItem represents an item that failed processing and was sent to the DLQ.
-type DLQItem[T any] struct { //nolint:govet // logical field grouping preferred over memory optimization
-	Item      T                      // The original item that failed.
-	Error     error                  // The error that caused the failure.
-	Timestamp time.Time              // When the failure occurred.
-	Attempts  int                    // Number of processing attempts.
-	Metadata  map[string]interface{} // Additional context.
+// DeadLetterQueue separates successful results from failed results into two distinct channels.
+// Unlike standard processors that return a single Result[T] channel, DLQ returns two channels:
+// one for successes and one for failures. This enables different downstream processing
+// strategies for successful vs failed items.
+//
+// Non-Consumed Channel Handling:
+// If either output channel is not consumed, DLQ will drop items that cannot be sent
+// to prevent deadlocks. Dropped items are logged and counted for monitoring.
+//
+// Concurrent Behavior:
+// DeadLetterQueue is safe for concurrent use. Multiple goroutines can consume from
+// both output channels simultaneously. The internal distribution logic runs in a
+// single goroutine to prevent race conditions.
+//
+// Usage Examples:
+//
+//	// Separate successes and failures for different handling
+//	dlq := streamz.NewDeadLetterQueue[Order](streamz.RealClock)
+//	successes, failures := dlq.Process(ctx, orders)
+//
+//	// Process successes in main path
+//	go func() {
+//		for success := range successes {
+//			processOrder(success.Value())
+//		}
+//	}()
+//
+//	// Handle failures separately (logging, metrics, retry queue)
+//	go func() {
+//		for failure := range failures {
+//			log.Printf("Order processing failed: %v", failure.Error())
+//			retryQueue.Send(failure)
+//		}
+//	}()
+//
+//	// Or ignore failures if only successes matter
+//	successes, _ := dlq.Process(ctx, orders)
+//	// failures channel ignored - items will be dropped and logged
+type DeadLetterQueue[T any] struct {
+	clock        Clock         // 8 bytes (pointer)
+	name         string        // 16 bytes (pointer + len)
+	droppedCount atomic.Uint64 // 8 bytes
 }
 
-// DLQHandler processes items that have been sent to the dead letter queue.
-type DLQHandler[T any] func(ctx context.Context, item DLQItem[T])
-
-// DeadLetterQueue captures failed items for later analysis or retry.
-// It wraps a processor and catches items that fail processing, sending
-// them to a dead letter queue for inspection, logging, or retry.
-//
-// The DLQ can be configured to:
-//   - Retry failed items with configurable attempts.
-//   - Store failed items for later processing.
-//   - Alert on failures.
-//   - Provide statistics on failure rates.
-//
-// Key features:
-//   - Configurable retry attempts before sending to DLQ.
-//   - Custom error classification.
-//   - Failure callbacks for monitoring.
-//   - Statistics tracking.
-//   - Option to continue or halt on failures.
-//
-// When to use:
-//   - When you need to handle processing failures gracefully.
-//   - For auditing failed items.
-//   - To implement retry logic with eventual give-up.
-//   - For monitoring and alerting on failures.
-//   - To prevent losing items due to transient failures.
-//
-// Example:
-//
-//	// Basic DLQ with retry.
-//	dlq := streamz.NewDeadLetterQueue(processor).
-//		MaxRetries(3).
-//		OnFailure(func(item DLQItem[Order]) {
-//			log.Error("Order failed", "id", item.Item.ID, "error", item.Error)
-//			storeInDatabase(item) // Save for manual review.
-//		})
-//
-//	// Process with DLQ protection.
-//	protected := dlq.Process(ctx, orders)
-//
-//	// Access failed items.
-//	for failed := range dlq.FailedItems() {
-//		handleFailedOrder(failed)
-//	}
-//
-// Performance characteristics:
-//   - Minimal overhead for successful items.
-//   - Additional goroutine for managing failed items.
-//   - Memory usage proportional to failed item count.
-type DeadLetterQueue[T any] struct { //nolint:govet // logical field grouping preferred over memory optimization
-	processor       Processor[T, T]
-	name            string
-	maxRetries      int
-	retryDelay      time.Duration
-	continueOnError bool
-	clock           Clock
-
-	// Error classification.
-	shouldRetry func(error) bool
-
-	// Failed items channel.
-	failedItems      chan DLQItem[T]
-	failedBufferSize int
-
-	// Callbacks.
-	onFailure DLQHandler[T]
-	onRetry   func(item T, attempt int, err error)
-
-	// Statistics.
-	processed atomic.Int64
-	succeeded atomic.Int64
-	failed    atomic.Int64
-	retried   atomic.Int64
-
-	// State management.
-	mutex  sync.RWMutex
-	closed bool
-}
-
-// NewDeadLetterQueue creates a DLQ wrapper around a processor.
-// Failed items are captured and can be accessed via the FailedItems channel.
-//
-// Default configuration:
-//   - MaxRetries: 0 (no retries).
-//   - ContinueOnError: true.
-//   - FailedBufferSize: 100.
-//   - Name: "dlq".
-//
-// Parameters:
-//   - processor: The processor to wrap with DLQ functionality.
-//   - clock: Clock interface for time operations
-//
-// Returns a new DeadLetterQueue with fluent configuration methods.
-func NewDeadLetterQueue[T any](processor Processor[T, T], clock Clock) *DeadLetterQueue[T] {
-	dlq := &DeadLetterQueue[T]{
-		processor:        processor,
-		name:             "dlq",
-		maxRetries:       0,
-		retryDelay:       time.Second,
-		continueOnError:  true,
-		failedBufferSize: 100,
-		clock:            clock,
-		shouldRetry: func(_ error) bool {
-			return true // Default: retry all errors.
-		},
+// NewDeadLetterQueue creates a new DeadLetterQueue processor.
+// Uses the provided clock for timeout operations - use RealClock for production,
+// fake clock for deterministic testing.
+func NewDeadLetterQueue[T any](clock Clock) *DeadLetterQueue[T] {
+	return &DeadLetterQueue[T]{
+		name:  "dlq",
+		clock: clock,
 	}
-
-	// Initialize failed items channel.
-	dlq.failedItems = make(chan DLQItem[T], dlq.failedBufferSize)
-
-	return dlq
 }
 
-// MaxRetries sets the maximum number of retry attempts before sending to DLQ.
-func (dlq *DeadLetterQueue[T]) MaxRetries(attempts int) *DeadLetterQueue[T] {
-	if attempts < 0 {
-		attempts = 0
-	}
-	dlq.maxRetries = attempts
-	return dlq
-}
-
-// RetryDelay sets the delay between retry attempts.
-func (dlq *DeadLetterQueue[T]) RetryDelay(delay time.Duration) *DeadLetterQueue[T] {
-	if delay < 0 {
-		delay = 0
-	}
-	dlq.retryDelay = delay
-	return dlq
-}
-
-// ContinueOnError determines whether processing continues after failures.
-// If false, the pipeline stops on first failure.
-func (dlq *DeadLetterQueue[T]) ContinueOnError(cont bool) *DeadLetterQueue[T] {
-	dlq.continueOnError = cont
-	return dlq
-}
-
-// WithFailedBufferSize sets the buffer size for the failed items channel.
-func (dlq *DeadLetterQueue[T]) WithFailedBufferSize(size int) *DeadLetterQueue[T] {
-	if size < 1 {
-		size = 1
-	}
-	dlq.failedBufferSize = size
-	// Recreate channel with new size.
-	dlq.mutex.Lock()
-	close(dlq.failedItems)
-	dlq.failedItems = make(chan DLQItem[T], size)
-	dlq.mutex.Unlock()
-	return dlq
-}
-
-// ShouldRetry sets a function to determine if an error should be retried.
-func (dlq *DeadLetterQueue[T]) ShouldRetry(fn func(error) bool) *DeadLetterQueue[T] {
-	if fn != nil {
-		dlq.shouldRetry = fn
-	}
-	return dlq
-}
-
-// OnFailure sets a callback for items sent to the DLQ.
-func (dlq *DeadLetterQueue[T]) OnFailure(handler DLQHandler[T]) *DeadLetterQueue[T] {
-	dlq.onFailure = handler
-	return dlq
-}
-
-// OnRetry sets a callback invoked before each retry attempt.
-func (dlq *DeadLetterQueue[T]) OnRetry(fn func(item T, attempt int, err error)) *DeadLetterQueue[T] {
-	dlq.onRetry = fn
-	return dlq
-}
-
-// WithName sets a custom name for this processor.
+// WithName sets a custom name for the DeadLetterQueue (for logging and monitoring).
 func (dlq *DeadLetterQueue[T]) WithName(name string) *DeadLetterQueue[T] {
 	dlq.name = name
 	return dlq
 }
 
-// Process implements the Processor interface with DLQ functionality.
-func (dlq *DeadLetterQueue[T]) Process(ctx context.Context, in <-chan T) <-chan T {
-	out := make(chan T)
-
-	go func() {
-		defer close(out)
-		defer dlq.closeFailedItems()
-
-		// Process item.s with retry logic.
-		for {
-			select {
-			case item, ok := <-in:
-				if !ok {
-					return
-				}
-
-				dlq.processed.Add(1)
-
-				// Try processing with retries.
-				success, err := dlq.processWithRetry(ctx, item, out)
-
-				if success {
-					dlq.succeeded.Add(1)
-				} else {
-					dlq.failed.Add(1)
-
-					// Send to DLQ.
-					dlqItem := DLQItem[T]{
-						Item:      item,
-						Error:     err,
-						Timestamp: dlq.clock.Now(),
-						Attempts:  dlq.maxRetries + 1,
-						Metadata:  make(map[string]interface{}),
-					}
-
-					// Call failure handler.
-					if dlq.onFailure != nil {
-						dlq.onFailure(ctx, dlqItem)
-					}
-
-					// Send to failed items channel (check if not closed).
-					dlq.mutex.RLock()
-					if !dlq.closed {
-						dlq.mutex.RUnlock()
-						select {
-						case dlq.failedItems <- dlqItem:
-						case <-ctx.Done():
-							return
-						}
-					} else {
-						dlq.mutex.RUnlock()
-					}
-
-					// Stop processing if configured.
-					if !dlq.continueOnError {
-						return
-					}
-				}
-
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-
-	return out
-}
-
-// processWithRetry attempts to process an item with retries.
-func (dlq *DeadLetterQueue[T]) processWithRetry(ctx context.Context, item T, out chan<- T) (bool, error) {
-	var lastErr error
-
-	for attempt := 0; attempt <= dlq.maxRetries; attempt++ {
-		// Create single-item channel for processor.
-		input := make(chan T, 1)
-		input <- item
-		close(input)
-
-		// Process item.
-		output := dlq.processor.Process(ctx, input)
-
-		// Check result.
-		select {
-		case result, ok := <-output:
-			if ok {
-				// Success - send to output.
-				select {
-				case out <- result:
-					return true, nil
-				case <-ctx.Done():
-					return false, ctx.Err()
-				}
-			}
-			// Channel closed without result - treat as error.
-			lastErr = fmt.Errorf("processor failed to produce output")
-
-		case <-dlq.clock.After(30 * time.Second): // Timeout.
-			lastErr = fmt.Errorf("processor timeout")
-
-		case <-ctx.Done():
-			return false, ctx.Err()
-		}
-
-		// Check if we should retry.
-		if attempt < dlq.maxRetries && dlq.shouldRetry(lastErr) {
-			dlq.retried.Add(1)
-
-			// Call retry callback.
-			if dlq.onRetry != nil {
-				dlq.onRetry(item, attempt+1, lastErr)
-			}
-
-			// Wait before retry.
-			if dlq.retryDelay > 0 {
-				select {
-				case <-dlq.clock.After(dlq.retryDelay):
-				case <-ctx.Done():
-					return false, ctx.Err()
-				}
-			}
-		} else {
-			// No more retries or error not retryable.
-			break
-		}
-	}
-
-	return false, lastErr
-}
-
-// FailedItems returns a channel of items that failed processing.
-// This channel is closed when the processor completes.
-func (dlq *DeadLetterQueue[T]) FailedItems() <-chan DLQItem[T] {
-	return dlq.failedItems
-}
-
-// closeFailedItems closes the failed items channel.
-func (dlq *DeadLetterQueue[T]) closeFailedItems() {
-	dlq.mutex.Lock()
-	defer dlq.mutex.Unlock()
-
-	if !dlq.closed {
-		close(dlq.failedItems)
-		dlq.closed = true
-	}
-}
-
-// GetStats returns current DLQ statistics.
-func (dlq *DeadLetterQueue[T]) GetStats() DLQStats {
-	return DLQStats{
-		Processed: dlq.processed.Load(),
-		Succeeded: dlq.succeeded.Load(),
-		Failed:    dlq.failed.Load(),
-		Retried:   dlq.retried.Load(),
-	}
-}
-
-// Name returns the processor name for debugging and monitoring.
+// Name returns the processor name.
 func (dlq *DeadLetterQueue[T]) Name() string {
 	return dlq.name
 }
 
-// DLQStats contains statistics about DLQ operations.
-type DLQStats struct { //nolint:govet // logical field grouping preferred over memory optimization
-	Processed int64 // Total items processed.
-	Succeeded int64 // Items successfully processed.
-	Failed    int64 // Items sent to DLQ.
-	Retried   int64 // Total retry attempts.
+// DroppedCount returns the number of items dropped due to non-consumed channels.
+func (dlq *DeadLetterQueue[T]) DroppedCount() uint64 {
+	return dlq.droppedCount.Load()
 }
 
-// SuccessRate returns the percentage of successful items.
-func (s DLQStats) SuccessRate() float64 {
-	if s.Processed == 0 {
-		return 0
-	}
-	return float64(s.Succeeded) / float64(s.Processed) * 100
+// Process separates the input stream into success and failure channels.
+// Returns two channels: (successes, failures).
+//
+// The distribution logic runs in a single goroutine to prevent race conditions.
+// Both output channels are closed when the input channel closes or context is canceled.
+//
+// If either output channel cannot accept an item (blocked consumer), the item is
+// dropped and logged to prevent deadlocks. This is particularly important when
+// only one of the two channels is consumed.
+func (dlq *DeadLetterQueue[T]) Process(ctx context.Context, in <-chan Result[T]) (success <-chan Result[T], failure <-chan Result[T]) {
+	successCh := make(chan Result[T])
+	failureCh := make(chan Result[T])
+
+	go dlq.distribute(ctx, in, successCh, failureCh)
+
+	return successCh, failureCh
 }
 
-// FailureRate returns the percentage of failed items.
-func (s DLQStats) FailureRate() float64 {
-	if s.Processed == 0 {
-		return 0
+// distribute handles the core logic of routing items to appropriate channels.
+// Runs in a single goroutine to ensure race-free operation.
+func (dlq *DeadLetterQueue[T]) distribute(ctx context.Context, in <-chan Result[T], successCh, failureCh chan Result[T]) {
+	defer close(successCh)
+	defer close(failureCh)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case result, ok := <-in:
+			if !ok {
+				return
+			}
+
+			if result.IsError() {
+				dlq.sendToFailures(ctx, result, failureCh)
+			} else {
+				dlq.sendToSuccesses(ctx, result, successCh)
+			}
+		}
 	}
-	return float64(s.Failed) / float64(s.Processed) * 100
+}
+
+// sendToSuccesses attempts to send a success result to the success channel.
+// If the channel is blocked or context is canceled, drops the item and logs the event.
+func (dlq *DeadLetterQueue[T]) sendToSuccesses(ctx context.Context, result Result[T], successCh chan Result[T]) {
+	select {
+	case successCh <- result:
+		// Sent successfully
+	case <-ctx.Done():
+		// Context canceled, exit gracefully
+		return
+	case <-dlq.clock.After(10 * time.Millisecond): // Small timeout for sustained blocking
+		// Channel blocked for too long - drop and log
+		dlq.handleDroppedItem(result, "success")
+	}
+}
+
+// sendToFailures attempts to send a failure result to the failure channel.
+// If the channel is blocked or context is canceled, drops the item and logs the event.
+func (dlq *DeadLetterQueue[T]) sendToFailures(ctx context.Context, result Result[T], failureCh chan Result[T]) {
+	select {
+	case failureCh <- result:
+		// Sent successfully
+	case <-ctx.Done():
+		// Context canceled, exit gracefully
+		return
+	case <-dlq.clock.After(10 * time.Millisecond): // Small timeout for sustained blocking
+		// Channel blocked for too long - drop and log
+		dlq.handleDroppedItem(result, "failure")
+	}
+}
+
+// handleDroppedItem logs dropped items and increments the counter.
+// This prevents deadlocks when consumers don't read from both channels.
+func (dlq *DeadLetterQueue[T]) handleDroppedItem(result Result[T], channelType string) {
+	dlq.droppedCount.Add(1)
+
+	if result.IsError() {
+		log.Printf("DLQ[%s]: Dropped item from %s channel - %v", dlq.name, channelType, result.Error())
+	} else {
+		log.Printf("DLQ[%s]: Dropped item from %s channel - value: %+v", dlq.name, channelType, result.Value())
+	}
 }

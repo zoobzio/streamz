@@ -15,15 +15,26 @@ import (
 	"fmt"
 	"math/rand"
 	"time"
+
+	"github.com/zoobzio/clockz"
+	"github.com/zoobzio/streamz"
 )
 
 func main() {
 	var sprint int
+	var testMode bool
 	flag.IntVar(&sprint, "sprint", 0, "Run specific sprint (1-6), 0 for full demo")
+	flag.BoolVar(&testMode, "test", false, "Use fake clock for deterministic timing")
 	flag.Parse()
 
 	// Enable test mode for faster demos
 	TestMode = true
+
+	// Configure clock based on test flag
+	var clock streamz.Clock = streamz.RealClock
+	if testMode {
+		clock = clockz.NewFakeClock()
+	}
 
 	fmt.Println("=== RealClock-Time Log Processing Pipeline Demo ===")
 	fmt.Println("Building a production log analytics system that evolves from MVP to enterprise-grade")
@@ -33,14 +44,14 @@ func main() {
 
 	if sprint > 0 {
 		// Run specific sprint
-		runSprint(ctx, sprint)
+		runSprint(ctx, sprint, clock)
 	} else {
 		// Run full evolution demo
-		runFullDemo(ctx)
+		runFullDemo(ctx, clock)
 	}
 }
 
-func runFullDemo(ctx context.Context) {
+func runFullDemo(ctx context.Context, clock streamz.Clock) {
 	// Sprint 1: MVP
 	fmt.Println("📦 SPRINT 1: MVP - Just Store the Logs!")
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -72,7 +83,7 @@ func runFullDemo(ctx context.Context) {
 	fmt.Println("Database: CPU 100%, Writes timing out!")
 	fmt.Println("Result: 50% of logs lost during incident 😱")
 	fmt.Println()
-	time.Sleep(2 * time.Second)
+	clock.Sleep(2 * time.Second)
 
 	// Sprint 2: Batching
 	fmt.Println("\n📦 SPRINT 2: Efficient Storage - Batching FTW!")
@@ -102,7 +113,7 @@ func runFullDemo(ctx context.Context) {
 	fmt.Println("\n😕 But wait...")
 	fmt.Println("Ops: 'Why did it take 5 minutes to know about that critical error?'")
 	fmt.Println("Dev: 'Well, it was stuck in a batch...'")
-	time.Sleep(2 * time.Second)
+	clock.Sleep(2 * time.Second)
 
 	// Sprint 3: RealClock-time alerts
 	fmt.Println("\n\n📦 SPRINT 3: RealClock-Time Error Detection!")
@@ -118,16 +129,16 @@ func runFullDemo(ctx context.Context) {
 
 	// Generate logs with errors
 	logs = generateLogs(1000, true, false)
-	go simulateLogStream(ctx, logs, 100*time.Millisecond)
+	go simulateLogStream(ctx, logs, 100*time.Millisecond, clock)
 
-	time.Sleep(3 * time.Second)
+	clock.Sleep(3 * time.Second)
 
 	alertCount := Alerting.GetAlertCount()
 	fmt.Printf("\n📊 Results: Sent %d immediate alerts\n", alertCount)
 	fmt.Println("\n😰 2 hours later...")
 	fmt.Println("Ops: 'STOP! 500 alerts per hour is killing us!'")
 	fmt.Println("Dev: 'Maybe we need smarter alerting...'")
-	time.Sleep(2 * time.Second)
+	clock.Sleep(2 * time.Second)
 
 	// Sprint 4: Smart alerting
 	fmt.Println("\n\n📦 SPRINT 4: Intelligent Rate-Based Alerting!")
@@ -145,9 +156,9 @@ func runFullDemo(ctx context.Context) {
 	// Simulate error spike
 	fmt.Println("Simulating normal traffic with error spike...")
 	logs = generateErrorSpike()
-	go simulateLogStream(ctx, logs, 50*time.Millisecond)
+	go simulateLogStream(ctx, logs, 50*time.Millisecond, clock)
 
-	time.Sleep(5 * time.Second)
+	clock.Sleep(5 * time.Second)
 
 	alerts := Alerting.GetAlerts()
 	fmt.Printf("\n📊 Results: %d smart alerts (80%% reduction!)\n", len(alerts))
@@ -157,7 +168,7 @@ func runFullDemo(ctx context.Context) {
 		}
 	}
 	fmt.Println("Ops: 'This is perfect! We can actually sleep now!'")
-	time.Sleep(2 * time.Second)
+	clock.Sleep(2 * time.Second)
 
 	// Sprint 5: Security
 	fmt.Println("\n\n📦 SPRINT 5: Security Threat Detection!")
@@ -175,9 +186,9 @@ func runFullDemo(ctx context.Context) {
 
 	// Generate logs with security threats
 	logs = generateLogsWithThreats()
-	go simulateLogStream(ctx, logs, 100*time.Millisecond)
+	go simulateLogStream(ctx, logs, 100*time.Millisecond, clock)
 
-	time.Sleep(5 * time.Second)
+	clock.Sleep(5 * time.Second)
 
 	threats := Security.GetDetectedThreats()
 	fmt.Printf("\n🔒 Detected %d security threats!\n", len(threats))
@@ -187,7 +198,7 @@ func runFullDemo(ctx context.Context) {
 		fmt.Printf("     Remediation: %s\n", threat.Remediation)
 	}
 	fmt.Println("\nSecurity team: 'We just prevented 3 breach attempts!'")
-	time.Sleep(2 * time.Second)
+	clock.Sleep(2 * time.Second)
 
 	// Sprint 6: Production scale
 	fmt.Println("\n\n📦 SPRINT 6: Production Scale - Handle the Storm!")
@@ -209,9 +220,9 @@ func runFullDemo(ctx context.Context) {
 	logs = generateLogs(50000, true, true)
 
 	start := time.Now()
-	go simulateLogStream(ctx, logs, 1*time.Millisecond) // Very fast!
+	go simulateLogStream(ctx, logs, 1*time.Millisecond, clock) // Very fast!
 
-	time.Sleep(10 * time.Second)
+	clock.Sleep(10 * time.Second)
 
 	metrics = MetricsCollector.GetMetrics()
 	duration := time.Since(start)
@@ -230,7 +241,7 @@ func runFullDemo(ctx context.Context) {
 	fmt.Println("Boss: 'Excellent work! The system performed flawlessly on Black Friday!'")
 }
 
-func runSprint(ctx context.Context, sprint int) {
+func runSprint(ctx context.Context, sprint int, clock streamz.Clock) {
 	ResetPipeline()
 	ResetServices()
 
@@ -279,15 +290,15 @@ func runSprint(ctx context.Context, sprint int) {
 		ProcessLogs(ctx, processChan)
 	} else {
 		// Stream processing
-		go simulateLogStream(ctx, logs, 50*time.Millisecond)
-		time.Sleep(10 * time.Second)
+		go simulateLogStream(ctx, logs, 50*time.Millisecond, clock)
+		clock.Sleep(10 * time.Second)
 	}
 
 	// Print results
 	printSprintResults(sprint)
 }
 
-func simulateLogStream(ctx context.Context, logs []LogEntry, delay time.Duration) {
+func simulateLogStream(ctx context.Context, logs []LogEntry, delay time.Duration, clock streamz.Clock) {
 	logChan := make(chan LogEntry)
 
 	// Start pipeline
@@ -298,7 +309,7 @@ func simulateLogStream(ctx context.Context, logs []LogEntry, delay time.Duration
 		select {
 		case logChan <- log:
 			if delay > 0 {
-				time.Sleep(delay)
+				clock.Sleep(delay)
 			}
 		case <-ctx.Done():
 			close(logChan)
