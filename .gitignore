@@ -40,3 +40,4 @@ benchmark_results.txt
 # Local environment files
 .env
 .env.local
+.remarks

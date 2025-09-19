@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -705,7 +706,7 @@ func TestPartition_BufferOverflow(t *testing.T) {
 	}()
 
 	// Slowly consume from one partition to create backpressure
-	var consumedCount int
+	var consumedCount atomic.Int32
 	consumerCtx, consumerCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer consumerCancel()
 
@@ -720,7 +721,7 @@ func TestPartition_BufferOverflow(t *testing.T) {
 					return
 				}
 				if result.IsSuccess() {
-					consumedCount++
+					consumedCount.Add(1)
 				}
 				time.Sleep(50 * time.Millisecond) // Slow consumption
 			}
@@ -734,7 +735,7 @@ func TestPartition_BufferOverflow(t *testing.T) {
 		defer wg.Done()
 		for result := range outputs[1] {
 			if result.IsSuccess() {
-				consumedCount++
+				consumedCount.Add(1)
 			}
 		}
 	}()
@@ -742,8 +743,9 @@ func TestPartition_BufferOverflow(t *testing.T) {
 	wg.Wait()
 
 	// Should still process all items (may take time due to backpressure)
-	if consumedCount < 5 {
-		t.Logf("Only consumed %d items due to backpressure (expected behavior)", consumedCount)
+	finalCount := consumedCount.Load()
+	if finalCount < 5 {
+		t.Logf("Only consumed %d items due to backpressure (expected behavior)", finalCount)
 	}
 }
 

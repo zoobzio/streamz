@@ -845,10 +845,12 @@ func TestSwitch_PaymentRouting(t *testing.T) {
 		t.Fatal("Timeout waiting for all results")
 	}
 
-	// Verify no errors
+	// Verify no errors (non-blocking check)
 	select {
-	case <-errorCh:
-		t.Error("Unexpected error received")
+	case result := <-errorCh:
+		if result.IsError() {
+			t.Errorf("Unexpected error received: %v", result.Error())
+		}
 	default:
 		// Expected - no errors
 	}
