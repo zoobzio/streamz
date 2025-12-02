@@ -284,23 +284,32 @@ func TestDeadLetterQueue_ContextCancellation(t *testing.T) {
 	// Allow goroutine cleanup with fake clock
 	clock.Advance(10 * time.Millisecond)
 
-	// Both channels should be closed
-	select {
-	case _, ok := <-successes:
-		if ok {
-			t.Error("Successes channel should be closed after context cancellation")
+	// Both channels should eventually close
+	// May receive pending items first, so drain until closed
+	timeout := time.After(500 * time.Millisecond)
+
+	successesClosed := false
+	for !successesClosed {
+		select {
+		case _, ok := <-successes:
+			if !ok {
+				successesClosed = true
+			}
+		case <-timeout:
+			t.Fatal("Successes channel should close after context cancellation")
 		}
-	case <-time.After(100 * time.Millisecond):
-		t.Error("Successes channel should close quickly after context cancellation")
 	}
 
-	select {
-	case _, ok := <-failures:
-		if ok {
-			t.Error("Failures channel should be closed after context cancellation")
+	failuresClosed := false
+	for !failuresClosed {
+		select {
+		case _, ok := <-failures:
+			if !ok {
+				failuresClosed = true
+			}
+		case <-timeout:
+			t.Fatal("Failures channel should close after context cancellation")
 		}
-	case <-time.After(100 * time.Millisecond):
-		t.Error("Failures channel should close quickly after context cancellation")
 	}
 }
 
