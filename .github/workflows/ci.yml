@@ -47,7 +47,6 @@ jobs:
       if: matrix.go-version == '1.23'
       uses: codecov/codecov-action@v4
       with:
-        token: ${{ secrets.CODECOV_TOKEN }}
         files: ./coverage-core.txt
         flags: unit
         name: streamz-coverage-${{ matrix.go-version }}

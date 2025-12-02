@@ -232,20 +232,17 @@ func TestPartition_ContextCancellation(t *testing.T) {
 	}
 
 	// Verify channels are closed within reasonable time
-	closed := 0
-	for _, out := range outputs {
+	// Use a WaitGroup to properly wait for all channels to drain
+	timeout := time.After(500 * time.Millisecond)
+	for i, out := range outputs {
 		select {
 		case _, ok := <-out:
-			if !ok {
-				closed++
+			if ok {
+				t.Errorf("Channel %d: expected closed, got value", i)
 			}
-		case <-time.After(100 * time.Millisecond):
-			t.Error("Channel not closed after context cancellation")
+		case <-timeout:
+			t.Fatalf("Channel %d not closed after context cancellation", i)
 		}
-	}
-
-	if closed != len(outputs) {
-		t.Errorf("Expected %d channels closed, got %d", len(outputs), closed)
 	}
 }
 
