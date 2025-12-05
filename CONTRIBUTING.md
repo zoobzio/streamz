@@ -66,14 +66,6 @@ New processors should:
 - Add documentation with examples
 - Support the `WithClock` pattern for time-based processors
 
-#### Examples
-
-New examples should:
-- Solve a real-world problem
-- Include tests
-- Have a descriptive README
-- Follow the existing structure
-
 ## Pull Request Process
 
 1. **Keep PRs focused** - One feature/fix per PR
@@ -108,7 +100,6 @@ streamz/
 ├── testing/          # Integration and reliability tests
 │   ├── integration/  # End-to-end pipeline tests
 │   └── helpers.go    # Shared test utilities
-├── examples/         # Example implementations
 ├── docs/             # Documentation
 └── .github/          # CI/CD configuration
 ```

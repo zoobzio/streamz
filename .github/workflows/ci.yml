@@ -149,66 +149,6 @@ jobs:
         name: benchmark-results-${{ github.sha }}
         path: benchmark_results.txt
 
-  # End-to-end verification using examples
-  e2e-examples:
-    name: E2E Examples
-    runs-on: ubuntu-latest
-    needs: [unit-tests, integration-tests]
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Set up Go ${{ env.GO_VERSION }}
-      uses: actions/setup-go@v5
-      with:
-        go-version: ${{ env.GO_VERSION }}
-        
-    - name: Cache Go modules
-      uses: actions/cache@v4
-      with:
-        path: ~/go/pkg/mod
-        key: ${{ runner.os }}-go-${{ env.GO_VERSION }}-${{ hashFiles('**/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-go-${{ env.GO_VERSION }}-
-          
-    - name: Download dependencies for examples
-      run: |
-        for dir in examples/*/; do
-          if [ -f "$dir/go.mod" ]; then
-            echo "Downloading dependencies for $dir"
-            (cd "$dir" && go mod download)
-          fi
-        done
-        
-    - name: Build all examples
-      run: |
-        for dir in examples/*/; do
-          if [ -f "$dir/main.go" ]; then
-            echo "Building $dir"
-            (cd "$dir" && go build -v .)
-          fi
-        done
-        
-    - name: Test examples with race detection
-      run: |
-        echo "Testing examples without coverage tracking..."
-        for dir in examples/*/; do
-          if [ -f "$dir/go.mod" ]; then
-            echo "Testing $dir"
-            (cd "$dir" && go test -v -race ./... || true)
-          fi
-        done
-        
-    - name: Verify example imports
-      run: |
-        echo "### Verifying examples use streamz correctly"
-        for dir in examples/*/; do
-          if [ -d "$dir" ] && [ -f "$dir/go.mod" ]; then
-            echo "Checking $dir"
-            # Verify they import the streamz module
-            (cd "$dir" && go list -m github.com/zoobzio/streamz) || echo "Warning: $dir doesn't import streamz"
-          fi
-        done
-
   # Security scanning
   security:
     name: Security Scan
@@ -249,7 +189,7 @@ jobs:
   ci-complete:
     name: CI Complete
     runs-on: ubuntu-latest
-    needs: [unit-tests, integration-tests, benchmarks, quality, e2e-examples, security]
+    needs: [unit-tests, integration-tests, benchmarks, quality, security]
     if: always()
     steps:
     - name: Check all jobs status
@@ -268,10 +208,6 @@ jobs:
         fi
         if [[ "${{ needs.quality.result }}" != "success" ]]; then
           echo "Code quality checks failed"
-          exit 1
-        fi
-        if [[ "${{ needs.e2e-examples.result }}" != "success" ]]; then
-          echo "E2E examples failed"
           exit 1
         fi
         if [[ "${{ needs.security.result }}" != "success" ]]; then

@@ -37,7 +37,6 @@ archives:
       - "README.md"
       - "Makefile"
       - "docs/**/*"
-      - "examples/**/*"
       - ".golangci.yml"
       - "clock/**/*"
     name_template: "{{ .ProjectName }}_{{ .Version }}_source"
@@ -125,10 +124,9 @@ release:
   # Custom release footer
   footer: |
     ---
-    
+
     **Full Documentation:** https://github.com/zoobzio/streamz/tree/v{{ .Version }}/docs
-    **Examples:** https://github.com/zoobzio/streamz/tree/v{{ .Version }}/examples
-    
+
     Thanks to all contributors!
 
 # Announce releases (optional)

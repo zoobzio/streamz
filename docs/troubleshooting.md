@@ -1432,10 +1432,9 @@ When optimizing pipeline performance:
 If you encounter issues not covered in this guide:
 
 1. Check the [API documentation](./api/) for processor-specific details
-2. Review [examples](../examples/) for similar use cases
-3. Run tests with `-race` flag to detect race conditions
-4. Use the debug helpers to add visibility to your pipeline
-5. Profile your application to identify bottlenecks
+2. Run tests with `-race` flag to detect race conditions
+3. Use the debug helpers to add visibility to your pipeline
+4. Profile your application to identify bottlenecks
 
 Remember: Most streaming issues come from:
 - Not closing channels properly

@@ -38,12 +38,11 @@ coverage:
         informational: false
         only_pulls: false
       
-      # Separate status for core library (excluding examples)
+      # Separate status for core library
       library:
         target: 80%
         threshold: 1%
         paths:
-          - "!examples/"
           - "!*_test.go"
         if_ci_failed: error
     
@@ -60,7 +59,6 @@ coverage:
 
 # Files to ignore in coverage
 ignore:
-  - "examples/**/*"      # Example applications
   - "**/*_test.go"      # Test files themselves
   - "**/mock_*.go"      # Mock files
   - "**/testdata/**"    # Test data
@@ -92,7 +90,6 @@ component_management:
       paths:
         - "*.go"
         - "!*_test.go"
-        - "!examples/**"
         - "!clock/testing/**"
     
     - component_id: processors
@@ -133,15 +130,7 @@ component_management:
 flags:
   # Unit tests
   unit:
-    paths:
-      - "!examples/**"
     carryforward: true
-  
-  # Integration tests (examples)
-  integration:
-    paths:
-      - "examples/**"
-    carryforward: false
 
 # GitHub Checks
 github_checks:

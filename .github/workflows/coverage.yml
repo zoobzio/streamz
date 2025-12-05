@@ -51,17 +51,6 @@ jobs:
         # Convert to Cobertura format for better PR integration
         gocover-cobertura < coverage-core.out > coverage-core.xml
     
-    - name: Test examples (verification only)
-      run: |
-        echo "=== Testing examples (no coverage tracking) ==="
-        for dir in examples/*/; do
-          if [ -f "$dir/go.mod" ]; then
-            example_name=$(basename "$dir")
-            echo "Testing $example_name"
-            (cd "$dir" && go test -v -race ./... || true)
-          fi
-        done
-    
     - name: Generate final coverage reports
       run: |
         # Use only core coverage for final reports since examples are separate modules
