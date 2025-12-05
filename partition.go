@@ -232,19 +232,35 @@ func (h *HashPartition[T, K]) Route(value T, partitionCount int) (idx int) {
 		}
 	}()
 
+	// Guard against invalid partition count
+	if partitionCount <= 0 {
+		return 0
+	}
+
 	key := h.keyExtractor(value) // Can panic - recovered above
 	hash := h.hasher(key)        // Can panic - recovered above
 
 	// Use modulo for simplicity and reliability
 	// While modulo has slight bias, it's predictable and correct
-	return int(hash % uint64(partitionCount)) //nolint:gosec // partitionCount validated > 0
+	// Safe: partitionCount validated > 0, so uint64 conversion is safe
+	// Result is always < partitionCount which fits in int
+	partition := int(hash % uint64(partitionCount)) //nolint:gosec // bound by partitionCount
+	return partition
 }
 
 // Route implements round-robin routing using atomic counter.
 // Thread-safe operation without locks for high performance.
 func (r *RoundRobinPartition[T]) Route(_ T, partitionCount int) int {
+	// Guard against invalid partition count
+	if partitionCount <= 0 {
+		return 0
+	}
+
 	current := atomic.AddUint64(&r.counter, 1) - 1
-	return int(current % uint64(partitionCount)) //nolint:gosec // partitionCount validated > 0
+	// Safe: partitionCount validated > 0, so uint64 conversion is safe
+	// Result is always < partitionCount which fits in int
+	partition := int(current % uint64(partitionCount)) //nolint:gosec // bound by partitionCount
+	return partition
 }
 
 // defaultHasher provides FNV-1a hash for common comparable types.

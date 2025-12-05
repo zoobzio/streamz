@@ -2,8 +2,9 @@ package streamz
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"math"
-	"math/rand/v2"
 )
 
 // Sample randomly selects items from a stream based on a probability rate.
@@ -87,8 +88,7 @@ func (s *Sample[T]) WithName(name string) *Sample[T] {
 // Each successful item has an independent probability of being kept.
 // Error items are always passed through unchanged.
 //
-// The selection uses rand.Float64() which provides cryptographically secure
-// randomness suitable for statistical sampling and load balancing.
+// The selection uses crypto/rand for secure randomness.
 func (s *Sample[T]) Process(ctx context.Context, in <-chan Result[T]) <-chan Result[T] {
 	out := make(chan Result[T])
 
@@ -112,9 +112,8 @@ func (s *Sample[T]) Process(ctx context.Context, in <-chan Result[T]) <-chan Res
 				continue
 			}
 
-			// Sample successful items based on rate
-			//nolint:gosec // Non-cryptographic randomness is acceptable for sampling
-			if rand.Float64() < s.rate {
+			// Sample successful items based on rate using crypto/rand
+			if cryptoFloat64() < s.rate {
 				select {
 				case out <- item:
 				case <-ctx.Done():
@@ -136,4 +135,17 @@ func (s *Sample[T]) Name() string {
 // Rate returns the current sampling rate.
 func (s *Sample[T]) Rate() float64 {
 	return s.rate
+}
+
+// cryptoFloat64 returns a cryptographically secure random float64 in [0.0, 1.0).
+func cryptoFloat64() float64 {
+	var buf [8]byte
+	_, err := rand.Read(buf[:])
+	if err != nil {
+		// On crypto/rand failure (extremely rare), fail open by keeping item
+		return 0.0
+	}
+	// Convert to uint64 and normalize to [0.0, 1.0)
+	n := binary.LittleEndian.Uint64(buf[:])
+	return float64(n) / float64(1<<64)
 }
