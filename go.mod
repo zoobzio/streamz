@@ -4,4 +4,4 @@ go 1.24
 
 toolchain go1.25.4
 
-require github.com/zoobzio/clockz v0.0.2
+require github.com/zoobzio/clockz v1.0.0
