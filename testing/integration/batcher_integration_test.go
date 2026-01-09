@@ -71,7 +71,7 @@ func TestBatcher_FanInBatcherFanOut(t *testing.T) {
 		wg.Add(1)
 		go func(index int) {
 			defer wg.Done()
-			results[index] = testinghelpers.CollectResultsWithTimeout(outputs[index], 1*time.Second)
+			results[index] = testinghelpers.CollectResultsWithTimeout(t, outputs[index], 1*time.Second)
 		}(i)
 	}
 

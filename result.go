@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// Result[T] represents either a successful value or an error in stream processing.
+// Result represents either a successful value or an error in stream processing.
 // This is a proof of concept for unified error handling that eliminates dual-channel patterns.
 // It follows the Result type pattern common in functional programming languages.
 // Metadata support added to carry context through stream processing pipelines.
@@ -402,7 +402,7 @@ func (*WindowCollector[T]) emitAllWindows(ctx context.Context, out chan<- Window
 	}
 }
 
-// Provide Window[T] compatibility methods for WindowCollection.
+// Values returns all successful values from the window collection.
 func (wc WindowCollection[T]) Values() []T {
 	var values []T
 	for _, result := range wc.Results {
@@ -413,6 +413,7 @@ func (wc WindowCollection[T]) Values() []T {
 	return values
 }
 
+// Errors returns all errors from the window collection.
 func (wc WindowCollection[T]) Errors() []*StreamError[T] {
 	var errors []*StreamError[T]
 	for _, result := range wc.Results {
@@ -423,10 +424,12 @@ func (wc WindowCollection[T]) Errors() []*StreamError[T] {
 	return errors
 }
 
+// Count returns the total number of results in the window collection.
 func (wc WindowCollection[T]) Count() int {
 	return len(wc.Results)
 }
 
+// SuccessCount returns the number of successful results in the window collection.
 func (wc WindowCollection[T]) SuccessCount() int {
 	count := 0
 	for _, result := range wc.Results {
@@ -437,6 +440,7 @@ func (wc WindowCollection[T]) SuccessCount() int {
 	return count
 }
 
+// ErrorCount returns the number of error results in the window collection.
 func (wc WindowCollection[T]) ErrorCount() int {
 	count := 0
 	for _, result := range wc.Results {
@@ -463,6 +467,7 @@ type WindowInfo struct {
 // WindowType represents the type of window.
 type WindowType string
 
+// Window type constants.
 const (
 	WindowTypeTumbling WindowType = "tumbling"
 	WindowTypeSliding  WindowType = "sliding"

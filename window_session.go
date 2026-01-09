@@ -192,8 +192,8 @@ func (w *SessionWindow[T]) Process(ctx context.Context, in <-chan Result[T]) <-c
 		for {
 			select {
 			case <-ctx.Done():
-				// Emit all remaining sessions
-				w.emitAllSessions(ctx, out, sessions)
+				// Emit all remaining sessions - use background context to ensure delivery
+				w.emitAllSessions(context.Background(), out, sessions)
 				return
 
 			case result, ok := <-in:

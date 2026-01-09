@@ -52,7 +52,12 @@ type PartitionConfig[T any] struct {
 const (
 	MetadataPartitionIndex    = "partition_index"    // int - target partition [0, N)
 	MetadataPartitionTotal    = "partition_total"    // int - total partition count N
-	MetadataPartitionStrategy = "partition_strategy" // string - "hash" or "round_robin"
+	MetadataPartitionStrategy = "partition_strategy" // string - "hash", "round_robin", or "error"
+)
+
+// Partition strategy name constants.
+const (
+	partitionStrategyError = "error"
 )
 
 // NewPartition creates a partition with custom strategy configuration.
@@ -169,7 +174,7 @@ func (p *Partition[T]) routeResult(ctx context.Context, result Result[T], channe
 	if result.IsError() {
 		// All errors go to partition 0 for centralized error handling
 		targetIndex = 0
-		strategyName = "error"
+		strategyName = partitionStrategyError
 	} else {
 		// Route successful values using strategy
 		targetIndex = p.safeRoute(result.Value())
@@ -287,7 +292,7 @@ func defaultHasher[K comparable](key K) uint64 {
 		_ = binary.Write(h, binary.LittleEndian, float64(v)) //nolint:errcheck // hash writer never fails
 	default:
 		// Fallback: convert to string and hash
-		_, _ = fmt.Fprintf(h, "%v", v)
+		_, _ = fmt.Fprintf(h, "%v", v) //nolint:errcheck // hash writer never fails
 	}
 
 	return h.Sum64()

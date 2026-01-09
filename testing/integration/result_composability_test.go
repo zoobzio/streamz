@@ -57,7 +57,7 @@ func TestResultComposability_FanInFanOut(t *testing.T) {
 		wg.Add(1)
 		go func(index int) {
 			defer wg.Done()
-			results[index] = testinghelpers.CollectResultsWithTimeout(outputs[index], 500*time.Millisecond)
+			results[index] = testinghelpers.CollectResultsWithTimeout(t, outputs[index], 500*time.Millisecond)
 		}(i)
 	}
 	wg.Wait()
@@ -157,7 +157,7 @@ func TestResultComposability_ErrorPropagation(t *testing.T) {
 		wg.Add(1)
 		go func(index int) {
 			defer wg.Done()
-			results[index] = testinghelpers.CollectResultsWithTimeout(outputs[index], 200*time.Millisecond)
+			results[index] = testinghelpers.CollectResultsWithTimeout(t, outputs[index], 200*time.Millisecond)
 		}(i)
 	}
 	wg.Wait()
@@ -248,7 +248,7 @@ func TestResultComposability_ComplexFlow(t *testing.T) {
 		wg.Add(1)
 		go func(index int) {
 			defer wg.Done()
-			branchResults[index] = testinghelpers.CollectResultsWithTimeout(branches[index], 500*time.Millisecond)
+			branchResults[index] = testinghelpers.CollectResultsWithTimeout(t, branches[index], 500*time.Millisecond)
 		}(i)
 	}
 	wg.Wait()
@@ -310,7 +310,7 @@ func TestResultComposability_ComplexFlow(t *testing.T) {
 
 	// Final merge
 	final := finalFanin.Process(ctx, recombinedInput1, recombinedInput2)
-	finalResults := testinghelpers.CollectResultsWithTimeout(final, 500*time.Millisecond)
+	finalResults := testinghelpers.CollectResultsWithTimeout(t, final, 500*time.Millisecond)
 
 	// Should have 2 * expectedItemCount items (duplicated from 2 branches)
 	expectedFinalCount := 2 * expectedItemCount
@@ -369,7 +369,7 @@ func TestResultComposability_BufferInPipeline(t *testing.T) {
 		wg.Add(1)
 		go func(index int) {
 			defer wg.Done()
-			results[index] = testinghelpers.CollectResultsWithTimeout(outputs[index], 500*time.Millisecond)
+			results[index] = testinghelpers.CollectResultsWithTimeout(t, outputs[index], 500*time.Millisecond)
 		}(i)
 	}
 	wg.Wait()
@@ -585,7 +585,7 @@ func TestResultComposability_ThrottleInPipeline(t *testing.T) {
 		wg.Add(1)
 		go func(index int) {
 			defer wg.Done()
-			results[index] = testinghelpers.CollectResultsWithTimeout(outputs[index], 2*time.Second)
+			results[index] = testinghelpers.CollectResultsWithTimeout(t, outputs[index], 2*time.Second)
 		}(i)
 	}
 
@@ -807,7 +807,7 @@ func TestResultComposability_DebounceInPipeline(t *testing.T) {
 		wg.Add(1)
 		go func(index int) {
 			defer wg.Done()
-			results[index] = testinghelpers.CollectResultsWithTimeout(outputs[index], 2*time.Second)
+			results[index] = testinghelpers.CollectResultsWithTimeout(t, outputs[index], 2*time.Second)
 		}(i)
 	}
 
@@ -955,7 +955,7 @@ func TestResultComposability_RouterInPipeline(t *testing.T) {
 	enriched := enricher.Process(ctx, merged)
 
 	// Step 5: Collect and verify results
-	results := testinghelpers.CollectResultsWithTimeout(enriched, 500*time.Millisecond)
+	results := testinghelpers.CollectResultsWithTimeout(t, enriched, 500*time.Millisecond)
 
 	// Verify we get expected number of results (7 total: 4 from input1 + 3 from input2)
 	expectedTotal := 7

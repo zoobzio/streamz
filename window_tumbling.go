@@ -129,8 +129,8 @@ func (w *TumblingWindow[T]) Process(ctx context.Context, in <-chan Result[T]) <-
 		for {
 			select {
 			case <-ctx.Done():
-				// Emit remaining results with window metadata
-				w.emitWindowResults(ctx, out, windowResults, currentWindow)
+				// Emit remaining results - use background context to ensure delivery
+				w.emitWindowResults(context.Background(), out, windowResults, currentWindow)
 				return
 
 			case result, ok := <-in:

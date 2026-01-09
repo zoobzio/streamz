@@ -161,8 +161,8 @@ func (w *SlidingWindow[T]) Process(ctx context.Context, in <-chan Result[T]) <-c
 		for {
 			select {
 			case <-ctx.Done():
-				// Emit all remaining windows
-				w.emitAllWindows(ctx, out, windows)
+				// Emit all remaining windows - use background context to ensure delivery
+				w.emitAllWindows(context.Background(), out, windows)
 				return
 
 			case result, ok := <-in:
@@ -185,9 +185,13 @@ func (w *SlidingWindow[T]) Process(ctx context.Context, in <-chan Result[T]) <-c
 					}
 				}
 
-				// Create new window at current slide boundary if needed
-				currentWindowStart := now.Truncate(w.slide)
-				if _, exists := windows[currentWindowStart]; !exists && !currentWindowStart.Before(firstItemTime) {
+				// Create new window at current slide boundary relative to first item
+				// This anchors windows to firstItemTime rather than absolute time
+				elapsed := now.Sub(firstItemTime)
+				slidesElapsed := elapsed / w.slide
+				currentWindowStart := firstItemTime.Add(slidesElapsed * w.slide)
+
+				if _, exists := windows[currentWindowStart]; !exists {
 					slidePtr := &w.slide
 					windows[currentWindowStart] = &windowState[T]{
 						meta: WindowMetadata{
@@ -243,8 +247,9 @@ func (w *SlidingWindow[T]) processTumblingMode(ctx context.Context, in <-chan Re
 	for {
 		select {
 		case <-ctx.Done():
+			// Emit remaining results - use background context to ensure delivery
 			if len(windowResults) > 0 {
-				w.emitWindowResults(ctx, out, windowResults, currentWindow)
+				w.emitWindowResults(context.Background(), out, windowResults, currentWindow)
 			}
 			return
 
