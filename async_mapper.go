@@ -286,17 +286,12 @@ func (a *AsyncMapper[In, Out]) processOrdered(ctx context.Context, in <-chan Res
 		}
 
 		// Emit any remaining results (shouldn't happen in normal operation)
-		seq := nextSeq
-		for len(pending) > 0 {
-			if item, ok := pending[seq]; ok {
-				delete(pending, seq)
-				select {
-				case out <- item.item:
-				case <-ctx.Done():
-					return
-				}
+		for _, item := range pending {
+			select {
+			case out <- item.item:
+			case <-ctx.Done():
+				return
 			}
-			seq++
 		}
 	}()
 

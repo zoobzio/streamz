@@ -249,7 +249,7 @@ func (h *HashPartition[T, K]) Route(value T, partitionCount int) (idx int) {
 	// While modulo has slight bias, it's predictable and correct
 	// Safe: partitionCount validated > 0, so uint64 conversion is safe
 	// Result is always < partitionCount which fits in int
-	partition := int(hash % uint64(partitionCount)) //nolint:gosec // bound by partitionCount
+	partition := int(hash % uint64(partitionCount)) // #nosec G115 -- result bounded by partitionCount
 	return partition
 }
 
@@ -264,7 +264,7 @@ func (r *RoundRobinPartition[T]) Route(_ T, partitionCount int) int {
 	current := atomic.AddUint64(&r.counter, 1) - 1
 	// Safe: partitionCount validated > 0, so uint64 conversion is safe
 	// Result is always < partitionCount which fits in int
-	partition := int(current % uint64(partitionCount)) //nolint:gosec // bound by partitionCount
+	partition := int(current % uint64(partitionCount)) // #nosec G115 -- result bounded by partitionCount
 	return partition
 }
 
